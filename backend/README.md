@@ -1,8 +1,36 @@
-# Google Apps Script Backend
+# Legacy Backend Code (DEPRECATED)
 
-This directory contains the Google Apps Script code for the Ringwheel backend.
+> ⚠️ **IMPORTANT**: This folder contains **legacy/experimental** backend code that is **NOT** used by the current Ringwheel deployment.
 
-## Setup
+## Canonical Backend
+
+**The canonical backend is located in `gas/`** (at the repository root).
+
+- The `gas/Code.gs` file contains the current Apps Script Web App implementation.
+- It uses the correct API contract with `type` parameter (not `action`).
+- It uses the correct sheet names: `Roster`, `Rings`, `Settings`, `SpinsLog`.
+
+## Why This Folder Exists
+
+This folder contains an earlier/experimental version of the backend that:
+- Uses `action` query parameter instead of `type`
+- Uses different sheet names (`SpinLog`, `RingWeights`)
+- Uses a different API response structure
+
+It is kept for historical reference but should **not** be deployed or used.
+
+## If You Need to Update the Backend
+
+1. Make changes in `gas/Code.gs`
+2. Follow the deployment instructions in `gas/` or the main project README
+3. Do NOT modify files in this `backend/` folder
+
+---
+
+<details>
+<summary>Original README (for reference only)</summary>
+
+## Setup (Legacy)
 
 1. Create a new Google Sheet
 2. Go to Extensions > Apps Script
@@ -21,7 +49,7 @@ This directory contains the Google Apps Script code for the Ringwheel backend.
    VITE_API_TOKEN=your_secret_token_here
    ```
 
-## API Endpoints
+## API Endpoints (Legacy)
 
 The Web App accepts the following actions via GET/POST with `action` and `token` query parameters:
 
@@ -36,7 +64,7 @@ The Web App accepts the following actions via GET/POST with `action` and `token`
 - `writeSettings` - Update app settings
 - `email` - Send email notification
 
-## Sheet Structure
+## Sheet Structure (Legacy)
 
 The Google Sheet should have the following sheets:
 
@@ -52,8 +80,4 @@ The Google Sheet should have the following sheets:
 4. **Settings** - App settings
    - Columns: Key, Value
 
-## Security
-
-- Always validate the API token on every request
-- Use the token stored in Script Properties
-- Never expose the token in client-side code
+</details>

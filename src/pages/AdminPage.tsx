@@ -1,7 +1,14 @@
 import { useState, useEffect } from 'react';
-import { APIService } from '../services/api';
-import type { Settings, RingWeights } from '../types';
+import { api, isApiConfigured } from '../api';
+import type { Settings, RingWeights, SettingRow, RingSlice } from '../types';
 import { REGIONS, TAXA, IUCN_STATUS } from '../utils/spin-engine';
+
+// Default ring colors matching schema/Rings.csv
+const RING_COLORS = {
+  A: '#4f46e5', // Regions - indigo
+  B: '#16a34a', // Taxa - green
+  C: '#eab308', // IUCN - yellow
+} as const;
 
 export const AdminPage = () => {
   const [settings, setSettings] = useState<Settings>({
@@ -21,17 +28,61 @@ export const AdminPage = () => {
   const [saveStatus, setSaveStatus] = useState<string>('');
 
   useEffect(() => {
-    // Load current settings and weights
+    // Load current settings and weights using new api
     Promise.all([
-      APIService.getSettings(),
-      APIService.getRings(),
-    ]).then(([settingsResponse, weightsResponse]) => {
-      if (settingsResponse.success && settingsResponse.data) {
-        setSettings(settingsResponse.data);
+      api.settings(),
+      api.rings(),
+    ]).then(([settingsRows, ringsRows]) => {
+      // Convert SettingRow[] to Settings object
+      const settingsMap = new Map<string, string>(settingsRows.map((r: SettingRow) => [r.key, r.value]));
+      setSettings(prev => ({
+        enableAudio: settingsMap.has('enableAudio') ? settingsMap.get('enableAudio') === 'true' : prev.enableAudio,
+        enableConfetti: settingsMap.has('enableConfetti') ? settingsMap.get('enableConfetti') === 'true' : prev.enableConfetti,
+        enablePlantaeMercy: settingsMap.has('enablePlantaeMercy') ? settingsMap.get('enablePlantaeMercy') !== 'false' : prev.enablePlantaeMercy,
+        pairCapPercent: parseInt(settingsMap.get('midterm_pair_cap_pct') || settingsMap.get('pairCapPercent') || '12', 10),
+        tickerSpeed: parseInt(settingsMap.get('tickerSpeed') || '100', 10),
+      }));
+      
+      // Convert RingSlice[] to legacy RingWeights format for display
+      // The new schema maps: Ring A = Regions, Ring B = Taxa, Ring C = IUCN
+      if (ringsRows.length > 0) {
+        const newWeights: RingWeights = {
+          regions: {} as Record<string, number>,
+          taxa: {} as Record<string, number>,
+          iucn: {} as Record<string, number>,
+        };
+        
+        ringsRows.forEach((slice: RingSlice) => {
+          if (slice.ring_name === 'A') {
+            (newWeights.regions as Record<string, number>)[slice.label] = slice.weight;
+          } else if (slice.ring_name === 'B') {
+            (newWeights.taxa as Record<string, number>)[slice.label] = slice.weight;
+          } else if (slice.ring_name === 'C') {
+            (newWeights.iucn as Record<string, number>)[slice.label] = slice.weight;
+          }
+        });
+        
+        // Fill in any missing values with default weight of 1
+        REGIONS.forEach(r => {
+          if (!(r in newWeights.regions)) {
+            (newWeights.regions as Record<string, number>)[r] = 1;
+          }
+        });
+        TAXA.forEach(t => {
+          if (!(t in newWeights.taxa)) {
+            (newWeights.taxa as Record<string, number>)[t] = 1;
+          }
+        });
+        IUCN_STATUS.forEach(i => {
+          if (!(i in newWeights.iucn)) {
+            (newWeights.iucn as Record<string, number>)[i] = 1;
+          }
+        });
+        
+        setWeights(newWeights as RingWeights);
       }
-      if (weightsResponse.success && weightsResponse.data) {
-        setWeights(weightsResponse.data);
-      }
+    }).catch(err => {
+      console.error('Failed to load settings/rings:', err);
     });
   }, []);
 
@@ -55,22 +106,71 @@ export const AdminPage = () => {
 
   const handleSaveSettings = async () => {
     setSaveStatus('Saving settings...');
-    const response = await APIService.writeSettings(settings);
-    if (response.success) {
+    try {
+      // Convert Settings object to SettingRow[]
+      const rows: SettingRow[] = [
+        { key: 'enableAudio', value: String(settings.enableAudio) },
+        { key: 'enableConfetti', value: String(settings.enableConfetti) },
+        { key: 'enablePlantaeMercy', value: String(settings.enablePlantaeMercy) },
+        { key: 'pairCapPercent', value: String(settings.pairCapPercent) },
+        { key: 'tickerSpeed', value: String(settings.tickerSpeed) },
+      ];
+      await api.writeSettings(rows);
       setSaveStatus('Settings saved successfully!');
-    } else {
-      setSaveStatus(`Error: ${response.error}`);
+    } catch (err) {
+      setSaveStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
     setTimeout(() => setSaveStatus(''), 3000);
   };
 
   const handleSaveWeights = async () => {
     setSaveStatus('Saving weights...');
-    const response = await APIService.writeRings(weights);
-    if (response.success) {
+    try {
+      // Convert legacy RingWeights to RingSlice[] format
+      // This maps legacy regions/taxa/iucn to rings A/B/C
+      const rows: RingSlice[] = [];
+      let orderIndex = 0;
+      
+      // Ring A = Regions
+      Object.entries(weights.regions).forEach(([label, weight]) => {
+        rows.push({
+          ring_name: 'A',
+          label,
+          color_hex: RING_COLORS.A,
+          weight: weight as number,
+          order_index: orderIndex++,
+          active: true,
+        });
+      });
+      
+      // Ring B = Taxa
+      Object.entries(weights.taxa).forEach(([label, weight]) => {
+        rows.push({
+          ring_name: 'B',
+          label,
+          color_hex: RING_COLORS.B,
+          weight: weight as number,
+          order_index: orderIndex++,
+          active: true,
+        });
+      });
+      
+      // Ring C = IUCN
+      Object.entries(weights.iucn).forEach(([label, weight]) => {
+        rows.push({
+          ring_name: 'C',
+          label,
+          color_hex: RING_COLORS.C,
+          weight: weight as number,
+          order_index: orderIndex++,
+          active: true,
+        });
+      });
+      
+      await api.writeRings(rows);
       setSaveStatus('Weights saved successfully!');
-    } else {
-      setSaveStatus(`Error: ${response.error}`);
+    } catch (err) {
+      setSaveStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
     setTimeout(() => setSaveStatus(''), 3000);
   };
@@ -253,13 +353,13 @@ export const AdminPage = () => {
         {/* API Status */}
         <div className="bg-white rounded-lg shadow-lg p-6">
           <h2 className="text-2xl font-bold mb-4">API Status</h2>
-          <p className={`font-semibold ${APIService.isConfigured() ? 'text-green-600' : 'text-red-600'}`}>
-            {APIService.isConfigured() 
+          <p className={`font-semibold ${isApiConfigured() ? 'text-green-600' : 'text-red-600'}`}>
+            {isApiConfigured() 
               ? '✓ API is configured' 
               : '✗ API not configured (check .env file)'}
           </p>
           <p className="mt-2 text-sm text-gray-600">
-            Configure VITE_WEB_APP_URL and VITE_API_TOKEN in your .env file
+            Configure VITE_SPIN_API_URL and VITE_SPIN_API_TOKEN in your .env file
           </p>
         </div>
       </div>
