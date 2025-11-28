@@ -3,6 +3,13 @@ import { api, isApiConfigured } from '../api';
 import type { Settings, RingWeights, SettingRow, RingSlice } from '../types';
 import { REGIONS, TAXA, IUCN_STATUS } from '../utils/spin-engine';
 
+// Default ring colors matching schema/Rings.csv
+const RING_COLORS = {
+  A: '#4f46e5', // Regions - indigo
+  B: '#16a34a', // Taxa - green
+  C: '#eab308', // IUCN - yellow
+} as const;
+
 export const AdminPage = () => {
   const [settings, setSettings] = useState<Settings>({
     enableAudio: true,
@@ -37,16 +44,43 @@ export const AdminPage = () => {
       }));
       
       // Convert RingSlice[] to legacy RingWeights format for display
-      // Note: The new schema uses ring_name A/B/C, but legacy UI expects regions/taxa/iucn
-      // This is a mismatch - keeping legacy display for now
-      const ringsByName = new Map<string, RingSlice[]>();
-      ringsRows.forEach((slice: RingSlice) => {
-        const list = ringsByName.get(slice.ring_name) || [];
-        list.push(slice);
-        ringsByName.set(slice.ring_name, list);
-      });
-      // For now, we don't convert to legacy weights - the admin page uses legacy format
-      // A full migration would require updating the admin UI
+      // The new schema maps: Ring A = Regions, Ring B = Taxa, Ring C = IUCN
+      if (ringsRows.length > 0) {
+        const newWeights: RingWeights = {
+          regions: {} as Record<string, number>,
+          taxa: {} as Record<string, number>,
+          iucn: {} as Record<string, number>,
+        };
+        
+        ringsRows.forEach((slice: RingSlice) => {
+          if (slice.ring_name === 'A') {
+            (newWeights.regions as Record<string, number>)[slice.label] = slice.weight;
+          } else if (slice.ring_name === 'B') {
+            (newWeights.taxa as Record<string, number>)[slice.label] = slice.weight;
+          } else if (slice.ring_name === 'C') {
+            (newWeights.iucn as Record<string, number>)[slice.label] = slice.weight;
+          }
+        });
+        
+        // Fill in any missing values with default weight of 1
+        REGIONS.forEach(r => {
+          if (!(r in newWeights.regions)) {
+            (newWeights.regions as Record<string, number>)[r] = 1;
+          }
+        });
+        TAXA.forEach(t => {
+          if (!(t in newWeights.taxa)) {
+            (newWeights.taxa as Record<string, number>)[t] = 1;
+          }
+        });
+        IUCN_STATUS.forEach(i => {
+          if (!(i in newWeights.iucn)) {
+            (newWeights.iucn as Record<string, number>)[i] = 1;
+          }
+        });
+        
+        setWeights(newWeights as RingWeights);
+      }
     }).catch(err => {
       console.error('Failed to load settings/rings:', err);
     });
@@ -102,7 +136,7 @@ export const AdminPage = () => {
         rows.push({
           ring_name: 'A',
           label,
-          color_hex: '#4f46e5',
+          color_hex: RING_COLORS.A,
           weight: weight as number,
           order_index: orderIndex++,
           active: true,
@@ -114,7 +148,7 @@ export const AdminPage = () => {
         rows.push({
           ring_name: 'B',
           label,
-          color_hex: '#16a34a',
+          color_hex: RING_COLORS.B,
           weight: weight as number,
           order_index: orderIndex++,
           active: true,
@@ -126,7 +160,7 @@ export const AdminPage = () => {
         rows.push({
           ring_name: 'C',
           label,
-          color_hex: '#eab308',
+          color_hex: RING_COLORS.C,
           weight: weight as number,
           order_index: orderIndex++,
           active: true,

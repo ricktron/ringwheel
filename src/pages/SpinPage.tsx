@@ -108,7 +108,9 @@ export const SpinPage = () => {
           result_C: result.iucn, // Ring C = IUCN
           plantae_mercy: result.plantaeMercyApplied ?? false,
           veto_used: isVetoRespin || vetoUsed,
-          seed: randomSeed(), // Generate seed for this spin
+          // Note: Legacy SpinEngine doesn't expose seed; generate one for logging reference
+          // Future: Use planSpin() which returns deterministic seed for reproducibility
+          seed: randomSeed(),
           is_test: false,
           rule_flags_json: JSON.stringify(ruleFlags),
         };
