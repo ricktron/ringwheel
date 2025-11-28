@@ -24,16 +24,22 @@ async function get<T>(type: string): Promise<T> {
 }
 
 /**
- * Generic POST request with token in JSON body
+ * Generic POST request with token in JSON body.
+ * We use text/plain to avoid CORS preflight with Apps Script.
+ * Apps Script still parses JSON from e.postData.contents.
  */
 async function post<T>(body: unknown): Promise<T> {
+  console.debug('Ringwheel API POST', body);
   const res = await fetch(base, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
     body: JSON.stringify({ ...(body as Record<string, unknown>), token }),
   });
+  console.debug('Ringwheel API POST response', res.status);
   if (!res.ok) throw new Error(`POST failed with ${res.status}`);
-  return res.json();
+  return res.json() as Promise<T>;
 }
 
 /**
