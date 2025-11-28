@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import confetti from 'canvas-confetti';
 import { SpinnerWheels } from '../components/SpinnerWheels';
-import { SpinEngine, REGIONS, TAXA, IUCN_STATUS } from '../utils/spin-engine';
+import { SpinEngine, REGIONS, TAXA, IUCN_STATUS, randomSeed } from '../utils/spin-engine';
 import { AudioService } from '../services/audio';
-import { APIService } from '../services/api';
-import type { SpinResult, Region, Settings } from '../types';
+import { api } from '../api';
+import type { SpinResult, Region, Settings, SpinsLogPayload } from '../types';
 
 export const SpinPage = () => {
   const [spinning, setSpinning] = useState(false);
@@ -24,18 +24,33 @@ export const SpinPage = () => {
   });
   const [manualRegion, setManualRegion] = useState<Region | undefined>();
   const [showRegionPicker, setShowRegionPicker] = useState(false);
+  const [vetoUsed, setVetoUsed] = useState(false);
+
+  // Generate session ID once per page load
+  const sessionId = useMemo(() => randomSeed(), []);
 
   useEffect(() => {
-    // Load settings from API
-    APIService.getSettings().then(response => {
-      if (response.success && response.data) {
-        setSettings(response.data);
-        AudioService.setEnabled(response.data.enableAudio);
-      }
+    // Load settings from API (using new api client)
+    // Note: The API returns SettingRow[], but legacy Settings type is used in UI
+    // For now, we keep the legacy settings handling; this can be unified later
+    api.settings().then(rows => {
+      // Convert SettingRow[] to Settings object
+      const settingsMap = new Map(rows.map(r => [r.key, r.value]));
+      setSettings(prev => ({
+        enableAudio: settingsMap.has('enableAudio') ? settingsMap.get('enableAudio') === 'true' : prev.enableAudio,
+        enableConfetti: settingsMap.has('enableConfetti') ? settingsMap.get('enableConfetti') === 'true' : prev.enableConfetti,
+        enablePlantaeMercy: settingsMap.has('enablePlantaeMercy') ? settingsMap.get('enablePlantaeMercy') !== 'false' : prev.enablePlantaeMercy,
+        pairCapPercent: parseInt(settingsMap.get('midterm_pair_cap_pct') || settingsMap.get('pairCapPercent') || '12', 10),
+        tickerSpeed: parseInt(settingsMap.get('tickerSpeed') || '100', 10),
+      }));
+      const audioEnabled = settingsMap.get('enableAudio') !== 'false';
+      AudioService.setEnabled(audioEnabled);
+    }).catch(err => {
+      console.error('Failed to load settings:', err);
     });
   }, []);
 
-  const performSpin = () => {
+  const performSpin = (isVetoRespin = false) => {
     if (spinning) return;
 
     setSpinning(true);
@@ -76,10 +91,37 @@ export const SpinPage = () => {
           });
         }
 
-        // Log spin to backend
-        APIService.logSpin(result).catch(err => {
+        // Build SpinsLogPayload matching schema/SpinsLog.csv headers
+        const ruleFlags: string[] = [];
+        if (result.plantaeMercyApplied) ruleFlags.push('plantae_mercy');
+        if (result.manualRegion) ruleFlags.push('manual_region');
+        if (isVetoRespin) ruleFlags.push('veto_respin');
+
+        const payload: SpinsLogPayload = {
+          timestamp_iso: new Date().toISOString(),
+          session_id: sessionId,
+          period: '', // Not tracked in legacy UI
+          student_name: '', // Not tracked in legacy UI
+          email: '', // Not tracked in legacy UI
+          result_A: result.region, // Ring A = Region
+          result_B: result.taxon, // Ring B = Taxon
+          result_C: result.iucn, // Ring C = IUCN
+          plantae_mercy: result.plantaeMercyApplied ?? false,
+          veto_used: isVetoRespin || vetoUsed,
+          seed: randomSeed(), // Generate seed for this spin
+          is_test: false,
+          rule_flags_json: JSON.stringify(ruleFlags),
+        };
+
+        // Log spin to backend using new api client
+        api.logSpin(payload).catch(err => {
           console.error('Failed to log spin:', err);
         });
+
+        // Reset veto flag after logging
+        if (isVetoRespin) {
+          setVetoUsed(true);
+        }
       }
     }, tickInterval);
   };
@@ -87,7 +129,7 @@ export const SpinPage = () => {
   const handleVeto = () => {
     spinEngine.vetoSpin(currentResult, 'triple');
     AudioService.playVeto();
-    performSpin();
+    performSpin(true); // Mark as veto respin
   };
 
   const handlePlantaeMercy = () => {
@@ -97,7 +139,7 @@ export const SpinPage = () => {
   const handleRegionSelect = (region: Region) => {
     setManualRegion(region);
     setShowRegionPicker(false);
-    performSpin();
+    performSpin(false); // Regular spin with manual region
   };
 
   const showPlantaeMercyButton = 
@@ -124,7 +166,7 @@ export const SpinPage = () => {
 
         <div className="flex justify-center gap-4 mt-8">
           <button
-            onClick={performSpin}
+            onClick={() => performSpin(false)}
             disabled={spinning}
             className="px-8 py-4 bg-blue-600 text-white rounded-lg font-semibold text-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors shadow-lg"
           >
