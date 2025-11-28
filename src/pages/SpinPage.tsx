@@ -59,7 +59,7 @@ export const SpinPage = () => {
     });
   }, []);
 
-  const performSpin = (isVetoRespin = false) => {
+  const executeSpin = (isVetoRespin: boolean, target: 'region' | 'taxon' | 'iucn' | null) => {
     if (spinning) return;
 
     setSpinning(true);
@@ -84,12 +84,12 @@ export const SpinPage = () => {
           manualRegion,
         };
 
-        if (isVetoRespin && vetoTarget) {
-           if (vetoTarget === 'region') {
+        if (isVetoRespin && target) {
+           if (target === 'region') {
              spinOptions = { ...spinOptions, manualTaxon: currentResult.taxon, manualIUCN: currentResult.iucn };
-           } else if (vetoTarget === 'taxon') {
+           } else if (target === 'taxon') {
              spinOptions = { ...spinOptions, manualRegion: currentResult.region, manualIUCN: currentResult.iucn };
-           } else if (vetoTarget === 'iucn') {
+           } else if (target === 'iucn') {
              spinOptions = { ...spinOptions, manualRegion: currentResult.region, manualTaxon: currentResult.taxon };
            }
         }
@@ -119,9 +119,9 @@ export const SpinPage = () => {
         if (result.manualRegion) ruleFlags.push('manual_region');
         if (isVetoRespin) {
           ruleFlags.push('veto_respin');
-          if (vetoTarget === 'region') ruleFlags.push('veto_respin_region');
-          if (vetoTarget === 'taxon') ruleFlags.push('veto_respin_taxon');
-          if (vetoTarget === 'iucn') ruleFlags.push('veto_respin_iucn');
+          if (target === 'region') ruleFlags.push('veto_respin_region');
+          if (target === 'taxon') ruleFlags.push('veto_respin_taxon');
+          if (target === 'iucn') ruleFlags.push('veto_respin_iucn');
         }
 
         const payload: SpinsLogPayload = {
@@ -134,7 +134,7 @@ export const SpinPage = () => {
           result_B: result.taxon, // Ring B = Taxon
           result_C: result.iucn, // Ring C = IUCN
           plantae_mercy: result.plantaeMercyApplied ?? false,
-          veto_used: isVetoRespin || vetoUsed,
+          veto_used: isVetoRespin,
           // Note: Legacy SpinEngine doesn't expose seed; generate one for logging reference
           // Future: Use planSpin() which returns deterministic seed for reproducibility
           seed: randomSeed(),
@@ -154,19 +154,33 @@ export const SpinPage = () => {
         // Reset veto flag after logging
         if (isVetoRespin) {
           setVetoUsed(true);
+        } else {
+          setVetoUsed(false);
         }
       }
     }, tickInterval);
   };
 
-  const handleVeto = () => {
+  const performVetoSpin = (target: 'region' | 'taxon' | 'iucn') => {
+    spinEngine.vetoSpin(currentResult, 'triple');
+    AudioService.playVeto();
+    executeSpin(true, target);
+  };
+
+  const handleSpinClick = () => {
+    if (vetoTarget) {
+      performVetoSpin(vetoTarget);
+    } else {
+      executeSpin(false, null);
+    }
+  };
+
+  const handleVetoClick = () => {
     if (!vetoTarget) {
       setVetoWarning('Select Region, Taxon, or IUCN Status to veto first.');
       return;
     }
-    spinEngine.vetoSpin(currentResult, 'triple');
-    AudioService.playVeto();
-    performSpin(true); // Mark as veto respin
+    performVetoSpin(vetoTarget);
   };
 
   const handlePlantaeMercy = () => {
@@ -176,7 +190,7 @@ export const SpinPage = () => {
   const handleRegionSelect = (region: Region) => {
     setManualRegion(region);
     setShowRegionPicker(false);
-    performSpin(false); // Regular spin with manual region
+    executeSpin(false, null); // Regular spin with manual region
   };
 
   const showPlantaeMercyButton = 
@@ -217,7 +231,7 @@ export const SpinPage = () => {
           
           <div className="flex justify-center gap-4">
             <button
-              onClick={() => performSpin(false)}
+              onClick={handleSpinClick}
               disabled={spinning}
               className="px-8 py-4 bg-blue-600 text-white rounded-lg font-semibold text-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors shadow-lg"
             >
@@ -226,7 +240,7 @@ export const SpinPage = () => {
 
             {!spinning && (
               <button
-                onClick={handleVeto}
+                onClick={handleVetoClick}
                 className="px-6 py-4 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition-colors shadow-lg"
               >
                 {vetoTarget ? `Veto ${vetoTarget === 'iucn' ? 'IUCN' : vetoTarget.charAt(0).toUpperCase() + vetoTarget.slice(1)} & Re-spin` : 'Veto & Re-spin'}
