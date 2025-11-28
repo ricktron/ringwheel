@@ -7,13 +7,21 @@ interface RingProps {
   spinning: boolean;
   label: string;
   color: string;
+  onClick?: () => void;
+  isSelected?: boolean;
 }
 
-const Ring = ({ items, currentIndex, spinning, label, color }: RingProps) => {
+const Ring = ({ items, currentIndex, spinning, label, color, onClick, isSelected }: RingProps) => {
   return (
-    <div className={`flex flex-col items-center ${spinning ? 'animate-pulse' : ''}`}>
-      <div className={`text-sm font-semibold mb-2 ${color}`}>{label}</div>
-      <div className="relative w-48 h-48 border-4 rounded-full flex items-center justify-center bg-white shadow-lg" style={{ borderColor: color.replace('text-', '') }}>
+    <div 
+      className={`flex flex-col items-center ${spinning ? 'animate-pulse' : ''} cursor-pointer transition-transform ${isSelected ? 'scale-105' : 'hover:scale-105'}`}
+      onClick={onClick}
+    >
+      <div className={`text-sm font-semibold mb-2 ${color} ${isSelected ? 'underline decoration-2 underline-offset-4' : ''}`}>{label}</div>
+      <div 
+        className={`relative w-48 h-48 border-4 rounded-full flex items-center justify-center bg-white shadow-lg transition-all ${isSelected ? 'ring-4 ring-offset-2 ring-blue-400 border-blue-500' : ''}`} 
+        style={{ borderColor: isSelected ? undefined : color.replace('text-', '') }}
+      >
         <div className="text-center">
           <div className="text-2xl font-bold">{items[currentIndex]}</div>
         </div>
@@ -33,6 +41,8 @@ interface SpinnerWheelsProps {
   regionItems: Region[];
   taxonItems: Taxon[];
   iucnItems: IUCN[];
+  onRingClick?: (ring: 'region' | 'taxon' | 'iucn') => void;
+  selectedRing?: 'region' | 'taxon' | 'iucn' | null;
 }
 
 export const SpinnerWheels = ({
@@ -43,6 +53,8 @@ export const SpinnerWheels = ({
   regionItems,
   taxonItems,
   iucnItems,
+  onRingClick,
+  selectedRing,
 }: SpinnerWheelsProps) => {
   const [regionIndex, setRegionIndex] = useState(0);
   const [taxonIndex, setTaxonIndex] = useState(0);
@@ -76,6 +88,8 @@ export const SpinnerWheels = ({
         spinning={spinning}
         label="Region"
         color="text-blue-600"
+        onClick={() => onRingClick?.('region')}
+        isSelected={selectedRing === 'region'}
       />
       <Ring
         items={taxonItems}
@@ -83,6 +97,8 @@ export const SpinnerWheels = ({
         spinning={spinning}
         label="Taxon"
         color="text-green-600"
+        onClick={() => onRingClick?.('taxon')}
+        isSelected={selectedRing === 'taxon'}
       />
       <Ring
         items={iucnItems}
@@ -90,6 +106,8 @@ export const SpinnerWheels = ({
         spinning={spinning}
         label="IUCN Status"
         color="text-red-600"
+        onClick={() => onRingClick?.('iucn')}
+        isSelected={selectedRing === 'iucn'}
       />
     </div>
   );

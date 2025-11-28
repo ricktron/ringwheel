@@ -222,7 +222,12 @@ export class SpinEngine {
   /**
    * Perform a single spin across all three rings
    */
-  spin(options: { enablePlantaeMercy?: boolean; manualRegion?: Region } = {}): SpinResult {
+  spin(options: { 
+    enablePlantaeMercy?: boolean; 
+    manualRegion?: Region;
+    manualTaxon?: Taxon;
+    manualIUCN?: IUCN;
+  } = {}): SpinResult {
     let attempts = 0;
     const maxAttempts = 100;
 
@@ -231,8 +236,8 @@ export class SpinEngine {
 
       // Spin each ring
       const region = options.manualRegion || this.spinRing(REGIONS, this.weights.regions);
-      const taxon = this.spinRing(TAXA, this.weights.taxa);
-      let iucn = this.spinRing(IUCN_STATUS, this.weights.iucn);
+      const taxon = options.manualTaxon || this.spinRing(TAXA, this.weights.taxa);
+      let iucn = options.manualIUCN || this.spinRing(IUCN_STATUS, this.weights.iucn);
 
       const pairKey = `${region}:${taxon}`;
       const tripleKey = `${region}:${taxon}:${iucn}`;

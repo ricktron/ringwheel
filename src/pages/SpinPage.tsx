@@ -26,6 +26,8 @@ export const SpinPage = () => {
   const [manualRegion, setManualRegion] = useState<Region | undefined>();
   const [showRegionPicker, setShowRegionPicker] = useState(false);
   const [vetoUsed, setVetoUsed] = useState(false);
+  const [vetoTarget, setVetoTarget] = useState<'region' | 'taxon' | 'iucn' | null>(null);
+  const [vetoWarning, setVetoWarning] = useState<string | null>(null);
 
   // Generate session ID once per page load
   const sessionId = useMemo(() => randomSeed(), []);
@@ -61,6 +63,7 @@ export const SpinPage = () => {
     if (spinning) return;
 
     setSpinning(true);
+    setVetoWarning(null);
     AudioService.playTick();
 
     // Simulate spinning animation
@@ -76,10 +79,22 @@ export const SpinPage = () => {
         clearInterval(tickerInterval);
         
         // Perform actual spin
-        const result = spinEngine.spin({
+        let spinOptions: any = {
           enablePlantaeMercy: settings.enablePlantaeMercy,
           manualRegion,
-        });
+        };
+
+        if (isVetoRespin && vetoTarget) {
+           if (vetoTarget === 'region') {
+             spinOptions = { ...spinOptions, manualTaxon: currentResult.taxon, manualIUCN: currentResult.iucn };
+           } else if (vetoTarget === 'taxon') {
+             spinOptions = { ...spinOptions, manualRegion: currentResult.region, manualIUCN: currentResult.iucn };
+           } else if (vetoTarget === 'iucn') {
+             spinOptions = { ...spinOptions, manualRegion: currentResult.region, manualTaxon: currentResult.taxon };
+           }
+        }
+
+        const result = spinEngine.spin(spinOptions);
 
         setCurrentResult(result);
         setSpinning(false);
@@ -102,7 +117,12 @@ export const SpinPage = () => {
         const ruleFlags: string[] = [];
         if (result.plantaeMercyApplied) ruleFlags.push('plantae_mercy');
         if (result.manualRegion) ruleFlags.push('manual_region');
-        if (isVetoRespin) ruleFlags.push('veto_respin');
+        if (isVetoRespin) {
+          ruleFlags.push('veto_respin');
+          if (vetoTarget === 'region') ruleFlags.push('veto_respin_region');
+          if (vetoTarget === 'taxon') ruleFlags.push('veto_respin_taxon');
+          if (vetoTarget === 'iucn') ruleFlags.push('veto_respin_iucn');
+        }
 
         const payload: SpinsLogPayload = {
           timestamp_iso: new Date().toISOString(),
@@ -140,6 +160,10 @@ export const SpinPage = () => {
   };
 
   const handleVeto = () => {
+    if (!vetoTarget) {
+      setVetoWarning('Select Region, Taxon, or IUCN Status to veto first.');
+      return;
+    }
     spinEngine.vetoSpin(currentResult, 'triple');
     AudioService.playVeto();
     performSpin(true); // Mark as veto respin
@@ -180,34 +204,44 @@ export const SpinPage = () => {
           regionItems={REGIONS}
           taxonItems={TAXA}
           iucnItems={IUCN_STATUS}
+          onRingClick={setVetoTarget}
+          selectedRing={vetoTarget}
         />
 
-        <div className="flex justify-center gap-4 mt-8">
-          <button
-            onClick={() => performSpin(false)}
-            disabled={spinning}
-            className="px-8 py-4 bg-blue-600 text-white rounded-lg font-semibold text-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors shadow-lg"
-          >
-            {spinning ? 'Spinning...' : 'SPIN'}
-          </button>
-
-          {!spinning && (
-            <button
-              onClick={handleVeto}
-              className="px-6 py-4 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition-colors shadow-lg"
-            >
-              🚫 Veto & Re-spin
-            </button>
+        <div className="flex flex-col items-center gap-4 mt-8">
+          {vetoWarning && (
+            <div className="text-red-600 font-semibold animate-pulse">
+              {vetoWarning}
+            </div>
           )}
-
-          {!spinning && showPlantaeMercyButton && (
+          
+          <div className="flex justify-center gap-4">
             <button
-              onClick={handlePlantaeMercy}
-              className="px-6 py-4 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors shadow-lg"
+              onClick={() => performSpin(false)}
+              disabled={spinning}
+              className="px-8 py-4 bg-blue-600 text-white rounded-lg font-semibold text-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors shadow-lg"
             >
-              🌿 Plantae Mercy
+              {spinning ? 'Spinning...' : 'SPIN'}
             </button>
-          )}
+
+            {!spinning && (
+              <button
+                onClick={handleVeto}
+                className="px-6 py-4 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition-colors shadow-lg"
+              >
+                {vetoTarget ? `Veto ${vetoTarget === 'iucn' ? 'IUCN' : vetoTarget.charAt(0).toUpperCase() + vetoTarget.slice(1)} & Re-spin` : 'Veto & Re-spin'}
+              </button>
+            )}
+
+            {!spinning && showPlantaeMercyButton && (
+              <button
+                onClick={handlePlantaeMercy}
+                className="px-6 py-4 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors shadow-lg"
+              >
+                🌿 Plantae Mercy
+              </button>
+            )}
+          </div>
         </div>
 
         {showRegionPicker && (
