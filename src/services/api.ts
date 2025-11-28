@@ -22,13 +22,13 @@ async function get<T>(type: string): Promise<T> {
 /**
  * Generic POST request with lowercase `type` in JSON body
  */
-async function post<T>(body: unknown): Promise<T> {
+async function post<T>(body: Record<string, unknown>): Promise<T> {
   const response = await fetch(API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ ...(body as object), token: API_TOKEN }),
+    body: JSON.stringify({ ...body, token: API_TOKEN }),
   });
   if (!response.ok) {
     throw new Error(`API POST failed: ${response.status}`);
