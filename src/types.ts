@@ -1,8 +1,56 @@
 // Core types for the ringwheel application
+
+// Legacy types for backward compatibility
 export type Region = 'Palearctic' | 'Nearctic' | 'Neotropical' | 'Afrotropical' | 'Indomalayan' | 'Australasian' | 'Antarctic' | 'Oceanic';
 export type Taxon = 'Mammalia' | 'Aves' | 'Reptilia' | 'Amphibia' | 'Actinopterygii' | 'Chondrichthyes' | 'Insecta' | 'Arachnida' | 'Plantae' | 'Fungi';
 export type IUCN = 'LC' | 'NT' | 'VU' | 'EN' | 'CR' | 'EW' | 'EX';
 
+// New API contract types (M1-M8)
+export type RingName = 'A' | 'B' | 'C';
+
+export interface RingSlice {
+  ring_name: RingName;
+  label: string;
+  color_hex: string;
+  weight: number;
+  order_index: number;
+  active: boolean;
+}
+
+export interface SettingRow {
+  key: string;
+  value: string;
+  notes?: string;
+}
+
+export interface SpinResultNew {
+  A: string;
+  B: string;
+  C: string;
+  seed: string;
+  flags: string[];
+  plantae_mercy: boolean;
+  veto_used: boolean;
+  is_test: boolean;
+}
+
+export interface SpinsLogPayload {
+  timestamp_iso: string;
+  session_id: string;
+  period: string;
+  student_name: string;
+  email: string;
+  result_A: string;
+  result_B: string;
+  result_C: string;
+  plantae_mercy: boolean;
+  veto_used: boolean;
+  seed: string;
+  is_test: boolean;
+  rule_flags_json: string;
+}
+
+// Legacy SpinResult for backward compatibility with existing UI
 export interface SpinResult {
   region: Region;
   taxon: Taxon;

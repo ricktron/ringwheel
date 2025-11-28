@@ -1,0 +1,5 @@
+ring_name,order_index,label,color_hex,weight,active
+A,1,Northern,#4f46e5,1,true
+A,2,Southern,#0ea5e9,1,true
+B,1,Plantae,#16a34a,1,true
+C,1,Region NT,#eab308,1,true
