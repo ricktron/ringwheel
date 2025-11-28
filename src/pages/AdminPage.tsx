@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api, isApiConfigured } from '../api';
+import { ApiStatusIndicator, ApiNotConfiguredBanner } from '../components/ApiStatusIndicator';
 import type { Settings, RingWeights, SettingRow, RingSlice } from '../types';
 import { REGIONS, TAXA, IUCN_STATUS } from '../utils/spin-engine';
 
@@ -28,6 +29,12 @@ export const AdminPage = () => {
   const [saveStatus, setSaveStatus] = useState<string>('');
 
   useEffect(() => {
+    // Only load data from API if configured
+    if (!isApiConfigured()) {
+      console.warn('API not configured - using default settings and weights');
+      return;
+    }
+
     // Load current settings and weights using new api
     Promise.all([
       api.settings(),
@@ -105,6 +112,12 @@ export const AdminPage = () => {
   };
 
   const handleSaveSettings = async () => {
+    if (!isApiConfigured()) {
+      setSaveStatus('Error: API not configured – cannot save to Sheet');
+      setTimeout(() => setSaveStatus(''), 3000);
+      return;
+    }
+
     setSaveStatus('Saving settings...');
     try {
       // Convert Settings object to SettingRow[]
@@ -116,14 +129,21 @@ export const AdminPage = () => {
         { key: 'tickerSpeed', value: String(settings.tickerSpeed) },
       ];
       await api.writeSettings(rows);
-      setSaveStatus('Settings saved successfully!');
+      setSaveStatus('Settings saved to Sheet!');
     } catch (err) {
-      setSaveStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      console.error('Failed to save settings:', err);
+      setSaveStatus(`Error saving – see console: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
     setTimeout(() => setSaveStatus(''), 3000);
   };
 
   const handleSaveWeights = async () => {
+    if (!isApiConfigured()) {
+      setSaveStatus('Error: API not configured – cannot save to Sheet');
+      setTimeout(() => setSaveStatus(''), 3000);
+      return;
+    }
+
     setSaveStatus('Saving weights...');
     try {
       // Convert legacy RingWeights to RingSlice[] format
@@ -168,9 +188,10 @@ export const AdminPage = () => {
       });
       
       await api.writeRings(rows);
-      setSaveStatus('Weights saved successfully!');
+      setSaveStatus('Weights saved to Sheet!');
     } catch (err) {
-      setSaveStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      console.error('Failed to save weights:', err);
+      setSaveStatus(`Error saving – see console: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
     setTimeout(() => setSaveStatus(''), 3000);
   };
@@ -186,18 +207,27 @@ export const AdminPage = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
+        <div className="flex justify-between items-center mb-4">
           <h1 className="text-4xl font-bold text-gray-800">⚙️ Admin Panel</h1>
-          <a
-            href="/spin"
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            Back to Spinner
-          </a>
+          <div className="flex items-center gap-4">
+            <ApiStatusIndicator />
+            <a
+              href="/spin"
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              Back to Spinner
+            </a>
+          </div>
         </div>
 
+        <ApiNotConfiguredBanner />
+
         {saveStatus && (
-          <div className="mb-6 p-4 bg-green-100 border border-green-400 text-green-700 rounded-lg">
+          <div className={`mb-6 p-4 border rounded-lg ${
+            saveStatus.includes('Error') 
+              ? 'bg-red-100 border-red-400 text-red-700' 
+              : 'bg-green-100 border-green-400 text-green-700'
+          }`}>
             {saveStatus}
           </div>
         )}

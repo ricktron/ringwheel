@@ -3,7 +3,8 @@ import confetti from 'canvas-confetti';
 import { SpinnerWheels } from '../components/SpinnerWheels';
 import { SpinEngine, REGIONS, TAXA, IUCN_STATUS, randomSeed } from '../utils/spin-engine';
 import { AudioService } from '../services/audio';
-import { api } from '../api';
+import { api, isApiConfigured } from '../api';
+import { ApiStatusIndicator, ApiNotConfiguredBanner } from '../components/ApiStatusIndicator';
 import type { SpinResult, Region, Settings, SpinsLogPayload } from '../types';
 
 export const SpinPage = () => {
@@ -30,6 +31,12 @@ export const SpinPage = () => {
   const sessionId = useMemo(() => randomSeed(), []);
 
   useEffect(() => {
+    // Only load settings from API if configured
+    if (!isApiConfigured()) {
+      console.warn('API not configured - using default settings');
+      return;
+    }
+
     // Load settings from API (using new api client)
     // Note: The API returns SettingRow[], but legacy Settings type is used in UI
     // For now, we keep the legacy settings handling; this can be unified later
@@ -115,10 +122,14 @@ export const SpinPage = () => {
           rule_flags_json: JSON.stringify(ruleFlags),
         };
 
-        // Log spin to backend using new api client
-        api.logSpin(payload).catch(err => {
-          console.error('Failed to log spin:', err);
-        });
+        // Log spin to backend using new api client (only if API is configured)
+        if (isApiConfigured()) {
+          api.logSpin(payload).catch(err => {
+            console.error('Failed to log spin:', err);
+          });
+        } else {
+          console.warn('API not configured - spin not logged');
+        }
 
         // Reset veto flag after logging
         if (isVetoRespin) {
@@ -152,9 +163,14 @@ export const SpinPage = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-4xl font-bold text-center mb-8 text-gray-800">
-          🎡 Ringwheel Spinner
-        </h1>
+        <div className="flex justify-between items-center mb-4">
+          <h1 className="text-4xl font-bold text-gray-800">
+            🎡 Ringwheel Spinner
+          </h1>
+          <ApiStatusIndicator />
+        </div>
+
+        <ApiNotConfiguredBanner />
 
         <SpinnerWheels
           region={currentResult.region}
