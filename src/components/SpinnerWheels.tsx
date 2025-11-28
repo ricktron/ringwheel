@@ -72,20 +72,26 @@ export const SpinnerWheels = ({
     if (!spinning) return;
 
     const interval = setInterval(() => {
-      setRegionIndex(prev => (prev + 1) % regionItems.length);
-      setTaxonIndex(prev => (prev + 1) % taxonItems.length);
-      setIucnIndex(prev => (prev + 1) % iucnItems.length);
+      if (!selectedRing || selectedRing === 'region') {
+        setRegionIndex(prev => (prev + 1) % regionItems.length);
+      }
+      if (!selectedRing || selectedRing === 'taxon') {
+        setTaxonIndex(prev => (prev + 1) % taxonItems.length);
+      }
+      if (!selectedRing || selectedRing === 'iucn') {
+        setIucnIndex(prev => (prev + 1) % iucnItems.length);
+      }
     }, 100);
 
     return () => clearInterval(interval);
-  }, [spinning, regionItems.length, taxonItems.length, iucnItems.length]);
+  }, [spinning, regionItems.length, taxonItems.length, iucnItems.length, selectedRing]);
 
   return (
     <div className="flex flex-wrap justify-center gap-8 my-8">
       <Ring
         items={regionItems}
         currentIndex={regionIndex}
-        spinning={spinning}
+        spinning={spinning && (!selectedRing || selectedRing === 'region')}
         label="Region"
         color="text-blue-600"
         onClick={() => onRingClick?.('region')}
@@ -94,7 +100,7 @@ export const SpinnerWheels = ({
       <Ring
         items={taxonItems}
         currentIndex={taxonIndex}
-        spinning={spinning}
+        spinning={spinning && (!selectedRing || selectedRing === 'taxon')}
         label="Taxon"
         color="text-green-600"
         onClick={() => onRingClick?.('taxon')}
@@ -103,7 +109,7 @@ export const SpinnerWheels = ({
       <Ring
         items={iucnItems}
         currentIndex={iucnIndex}
-        spinning={spinning}
+        spinning={spinning && (!selectedRing || selectedRing === 'iucn')}
         label="IUCN Status"
         color="text-red-600"
         onClick={() => onRingClick?.('iucn')}

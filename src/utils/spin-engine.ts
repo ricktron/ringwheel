@@ -324,6 +324,8 @@ export class SpinEngine {
     options: { enablePlantaeMercy?: boolean } = {}
   ): { result: SpinResult; ruleFlags: string[] } {
     const ruleFlags: string[] = [];
+    
+    // Start with a copy of the current result to ensure non-targets stay static
     let region = currentResult.region;
     let taxon = currentResult.taxon;
     let iucn = currentResult.iucn;
