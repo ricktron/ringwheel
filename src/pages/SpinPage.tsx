@@ -59,6 +59,63 @@ export const SpinPage = () => {
     });
   }, []);
 
+  const applySpin = (
+    result: SpinResult,
+    ruleFlags: string[],
+    isVeto: boolean,
+    target: 'region' | 'taxon' | 'iucn' | null
+  ) => {
+    setCurrentResult(result);
+    setSpinning(false);
+    setManualRegion(undefined);
+    setShowRegionPicker(false);
+
+    // Trigger confetti
+    if (settings.enableConfetti) {
+      confetti({
+        particleCount: 100,
+        spread: 70,
+        origin: { y: 0.6 },
+      });
+    }
+
+    // Add generic veto flag if specific one is present
+    const finalRuleFlags = [...ruleFlags];
+    if (isVeto && !finalRuleFlags.includes('veto_respin')) {
+      finalRuleFlags.push('veto_respin');
+    }
+
+    const payload: SpinsLogPayload = {
+      timestamp_iso: new Date().toISOString(),
+      session_id: sessionId,
+      period: '', 
+      student_name: '', 
+      email: '', 
+      result_A: result.region, 
+      result_B: result.taxon, 
+      result_C: result.iucn, 
+      plantae_mercy: result.plantaeMercyApplied ?? false,
+      veto_used: isVeto,
+      seed: randomSeed(),
+      is_test: false,
+      rule_flags_json: JSON.stringify(finalRuleFlags),
+    };
+
+    if (isApiConfigured()) {
+      api.logSpin(payload).catch(err => {
+        console.error('Failed to log spin:', err);
+      });
+    } else {
+      console.warn('API not configured - spin not logged');
+    }
+
+    if (isVeto) {
+      setVetoUsed(true);
+    } else {
+      setVetoUsed(false);
+    }
+  };
+
   const executeSpin = (isVetoRespin: boolean, target: 'region' | 'taxon' | 'iucn' | null) => {
     if (spinning) return;
 
@@ -78,92 +135,35 @@ export const SpinPage = () => {
       if (elapsed >= spinDuration) {
         clearInterval(tickerInterval);
         
-        // Perform actual spin
-        let spinOptions: any = {
-          enablePlantaeMercy: settings.enablePlantaeMercy,
-          manualRegion,
-        };
+        let result: SpinResult;
+        let ruleFlags: string[] = [];
 
         if (isVetoRespin && target) {
-           if (target === 'region') {
-             spinOptions = { ...spinOptions, manualTaxon: currentResult.taxon, manualIUCN: currentResult.iucn };
-           } else if (target === 'taxon') {
-             spinOptions = { ...spinOptions, manualRegion: currentResult.region, manualIUCN: currentResult.iucn };
-           } else if (target === 'iucn') {
-             spinOptions = { ...spinOptions, manualRegion: currentResult.region, manualTaxon: currentResult.taxon };
-           }
-        }
-
-        const result = spinEngine.spin(spinOptions);
-
-        setCurrentResult(result);
-        setSpinning(false);
-        setManualRegion(undefined);
-        setShowRegionPicker(false);
-
-        // Play win sound
-        AudioService.playWin();
-
-        // Trigger confetti
-        if (settings.enableConfetti) {
-          confetti({
-            particleCount: 100,
-            spread: 70,
-            origin: { y: 0.6 },
-          });
-        }
-
-        // Build SpinsLogPayload matching schema/SpinsLog.csv headers
-        const ruleFlags: string[] = [];
-        if (result.plantaeMercyApplied) ruleFlags.push('plantae_mercy');
-        if (result.manualRegion) ruleFlags.push('manual_region');
-        if (isVetoRespin) {
-          ruleFlags.push('veto_respin');
-          if (target === 'region') ruleFlags.push('veto_respin_region');
-          if (target === 'taxon') ruleFlags.push('veto_respin_taxon');
-          if (target === 'iucn') ruleFlags.push('veto_respin_iucn');
-        }
-
-        const payload: SpinsLogPayload = {
-          timestamp_iso: new Date().toISOString(),
-          session_id: sessionId,
-          period: '', // Not tracked in legacy UI
-          student_name: '', // Not tracked in legacy UI
-          email: '', // Not tracked in legacy UI
-          result_A: result.region, // Ring A = Region
-          result_B: result.taxon, // Ring B = Taxon
-          result_C: result.iucn, // Ring C = IUCN
-          plantae_mercy: result.plantaeMercyApplied ?? false,
-          veto_used: isVetoRespin,
-          // Note: Legacy SpinEngine doesn't expose seed; generate one for logging reference
-          // Future: Use planSpin() which returns deterministic seed for reproducibility
-          seed: randomSeed(),
-          is_test: false,
-          rule_flags_json: JSON.stringify(ruleFlags),
-        };
-
-        // Log spin to backend using new api client (only if API is configured)
-        if (isApiConfigured()) {
-          api.logSpin(payload).catch(err => {
-            console.error('Failed to log spin:', err);
-          });
+           const vetoOutput = spinEngine.vetoSpinSingle(currentResult, target, { enablePlantaeMercy: settings.enablePlantaeMercy });
+           result = vetoOutput.result;
+           ruleFlags = vetoOutput.ruleFlags;
+           AudioService.playVeto();
         } else {
-          console.warn('API not configured - spin not logged');
+           const spinOptions = {
+             enablePlantaeMercy: settings.enablePlantaeMercy,
+             manualRegion,
+           };
+           result = spinEngine.spin(spinOptions);
+           if (result.plantaeMercyApplied) ruleFlags.push('plantae_mercy');
+           if (result.manualRegion) ruleFlags.push('manual_region');
+           AudioService.playWin();
         }
 
-        // Reset veto flag after logging
+        applySpin(result, ruleFlags, isVetoRespin, target);
+        
         if (isVetoRespin) {
-          setVetoUsed(true);
-        } else {
-          setVetoUsed(false);
+            setVetoTarget(null);
         }
       }
     }, tickInterval);
   };
 
   const performVetoSpin = (target: 'region' | 'taxon' | 'iucn') => {
-    spinEngine.vetoSpin(currentResult, 'triple');
-    AudioService.playVeto();
     executeSpin(true, target);
   };
 

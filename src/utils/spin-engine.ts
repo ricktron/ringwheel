@@ -316,6 +316,59 @@ export class SpinEngine {
   }
 
   /**
+   * Perform a single-ring veto spin
+   */
+  vetoSpinSingle(
+    currentResult: SpinResult,
+    target: 'region' | 'taxon' | 'iucn',
+    options: { enablePlantaeMercy?: boolean } = {}
+  ): { result: SpinResult; ruleFlags: string[] } {
+    const ruleFlags: string[] = [];
+    let region = currentResult.region;
+    let taxon = currentResult.taxon;
+    let iucn = currentResult.iucn;
+
+    if (target === 'region') {
+      region = this.spinRing(REGIONS, this.weights.regions);
+      ruleFlags.push('veto_respin_region');
+    } else if (target === 'taxon') {
+      taxon = this.spinRing(TAXA, this.weights.taxa);
+      ruleFlags.push('veto_respin_taxon');
+    } else if (target === 'iucn') {
+      iucn = this.spinRing(IUCN_STATUS, this.weights.iucn);
+      ruleFlags.push('veto_respin_iucn');
+    }
+
+    // Apply Plantae Mercy rule logic for single ring spins
+    let plantaeMercyApplied = false;
+    
+    // If we are spinning IUCN and Taxon is Plantae, avoid bad statuses
+    if (target === 'iucn' && options.enablePlantaeMercy && taxon === 'Plantae') {
+      if (['NT', 'VU', 'EN'].includes(iucn)) {
+        const safeStatuses = IUCN_STATUS.filter(s => !['NT', 'VU', 'EN'].includes(s));
+        iucn = safeStatuses[CryptoRNG.getRandomInt(safeStatuses.length)];
+        plantaeMercyApplied = true;
+      }
+    }
+
+    // Note: If target is 'taxon' and we land on Plantae, we do NOT change IUCN 
+    // to preserve the "single ring" behavior, even if IUCN is in a mercy state.
+    // This differs slightly from triple spin but respects the veto constraint.
+
+    return {
+      result: {
+        region,
+        taxon,
+        iucn,
+        timestamp: Date.now(),
+        plantaeMercyApplied,
+        manualRegion: currentResult.manualRegion
+      },
+      ruleFlags
+    };
+  }
+
+  /**
    * Veto a spin result (for re-spin functionality)
    */
   vetoSpin(result: SpinResult, vetoType: 'pair' | 'triple' = 'triple') {
