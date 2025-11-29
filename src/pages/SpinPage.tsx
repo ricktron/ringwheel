@@ -5,7 +5,16 @@ import { SpinEngine, REGIONS, TAXA, IUCN_STATUS, randomSeed } from '../utils/spi
 import { AudioService } from '../services/audio';
 import { api, isApiConfigured } from '../api';
 import { ApiStatusIndicator, ApiNotConfiguredBanner } from '../components/ApiStatusIndicator';
-import type { SpinResult, Region, Settings, SpinsLogPayload } from '../types';
+import type { SpinResult, Region, Settings, SpinsLogPayload, RosterStudent, SpinQueueItem } from '../types';
+
+function shuffleArray<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 
 const buildSpinLogPayload = (
   result: SpinResult,
@@ -55,6 +64,17 @@ export const SpinPage = () => {
   const [showDebug, setShowDebug] = useState(false);
   const [lastLoggedRow, setLastLoggedRow] = useState<SpinsLogPayload | null>(null);
 
+  // C1: Spin queue state
+  const [selectedSemester, setSelectedSemester] = useState<'S1' | 'S2'>('S1');
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('A');
+  const [orderMode, setOrderMode] = useState<'alphabetical' | 'random'>('alphabetical');
+
+  const [rosterCache, setRosterCache] = useState<RosterStudent[] | null>(null);
+  const [spinQueue, setSpinQueue] = useState<SpinQueueItem[]>([]);
+  const [currentStudent, setCurrentStudent] = useState<SpinQueueItem | null>(null);
+
+  const [queueStatus, setQueueStatus] = useState<string | null>(null);
+
   // Generate session ID once per page load
   const sessionId = useMemo(() => randomSeed(), []);
 
@@ -84,6 +104,60 @@ export const SpinPage = () => {
       console.error('Failed to load settings:', err);
     });
   }, []);
+
+  const handleLoadRoster = async () => {
+    if (!isApiConfigured()) {
+      setQueueStatus("API not configured – cannot load roster");
+      return;
+    }
+
+    let roster = rosterCache;
+    if (!roster) {
+      try {
+        setQueueStatus("Loading roster...");
+        roster = await api.roster();
+        setRosterCache(roster);
+      } catch (err) {
+        console.error("Failed to load roster:", err);
+        setQueueStatus("Failed to load roster from API.");
+        return;
+      }
+    }
+
+    // Filter candidates
+    // Note: We assume 'class' field might be used later, but for now just filter by period
+    const candidates = roster.filter(student => {
+      const p = selectedSemester === 'S1' ? student.s1Period : student.s2Period;
+      return p === selectedPeriod;
+    });
+
+    let queue: SpinQueueItem[] = candidates.map(student => ({
+      email: student.email,
+      name: `${student.first} ${student.last}`.trim(),
+      period: (selectedSemester === 'S1' ? student.s1Period : student.s2Period) ?? '',
+      hasSpun: false,
+    }));
+
+    if (orderMode === 'alphabetical') {
+      queue.sort((a, b) => a.name.localeCompare(b.name));
+    } else {
+      queue = shuffleArray(queue);
+    }
+
+    setSpinQueue(queue);
+    setCurrentStudent(null);
+    setQueueStatus(`Loaded ${queue.length} students for ${selectedSemester} Period ${selectedPeriod}`);
+  };
+
+  const handleNextSpinner = () => {
+    const next = spinQueue.find(item => !item.hasSpun);
+    if (!next) {
+      setQueueStatus("All students in this queue have spun.");
+      return;
+    }
+    setCurrentStudent(next);
+    // Note: We do not mark them as spun yet (Phase C2)
+  };
 
   const applySpin = (
     result: SpinResult,
@@ -267,6 +341,97 @@ export const SpinPage = () => {
         </div>
 
         <ApiNotConfiguredBanner />
+
+        {/* Queue Panel (Phase C1) */}
+        <div className="bg-white p-4 rounded-lg shadow-md mb-6 border border-gray-200 max-w-4xl mx-auto">
+          <div className="flex flex-wrap gap-4 items-end">
+            <div>
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Semester</label>
+              <select 
+                value={selectedSemester} 
+                onChange={e => setSelectedSemester(e.target.value as 'S1' | 'S2')}
+                className="border rounded px-2 py-1 text-sm"
+              >
+                <option value="S1">S1</option>
+                <option value="S2">S2</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Period</label>
+              <input 
+                type="text" 
+                value={selectedPeriod} 
+                onChange={e => setSelectedPeriod(e.target.value.toUpperCase())}
+                className="border rounded px-2 py-1 text-sm w-16"
+                maxLength={2}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Order</label>
+              <select 
+                value={orderMode} 
+                onChange={e => setOrderMode(e.target.value as 'alphabetical' | 'random')}
+                className="border rounded px-2 py-1 text-sm"
+              >
+                <option value="alphabetical">Alphabetical</option>
+                <option value="random">Random</option>
+              </select>
+            </div>
+            <button 
+              onClick={handleLoadRoster}
+              className="bg-indigo-600 text-white px-3 py-1 rounded text-sm font-semibold hover:bg-indigo-700 transition-colors"
+            >
+              Load Roster
+            </button>
+            <button 
+              onClick={handleNextSpinner}
+              className="bg-green-600 text-white px-3 py-1 rounded text-sm font-semibold hover:bg-green-700 transition-colors"
+              disabled={spinQueue.length === 0}
+            >
+              Next Spinner
+            </button>
+          </div>
+
+          {queueStatus && (
+            <div className="mt-2 text-sm text-gray-600 italic">
+              {queueStatus}
+            </div>
+          )}
+
+          {currentStudent && (
+            <div className="mt-3 p-2 bg-blue-50 border border-blue-200 rounded flex items-center justify-between">
+              <span className="font-bold text-blue-800">Current: {currentStudent.name} ({currentStudent.period})</span>
+            </div>
+          )}
+
+          {spinQueue.length > 0 && (
+            <div className="mt-3 max-h-32 overflow-y-auto border border-gray-100 rounded text-xs">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 sticky top-0">
+                  <tr>
+                    <th className="px-2 py-1">Status</th>
+                    <th className="px-2 py-1">Name</th>
+                    <th className="px-2 py-1">Period</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {spinQueue.map((item, idx) => {
+                    const isCurrent = currentStudent === item;
+                    return (
+                      <tr key={idx} className={isCurrent ? "bg-blue-100" : "even:bg-gray-50"}>
+                        <td className="px-2 py-1">
+                          {item.hasSpun ? "✓" : (item === currentStudent ? "•" : "")}
+                        </td>
+                        <td className="px-2 py-1 font-medium">{item.name}</td>
+                        <td className="px-2 py-1">{item.period}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
 
         <SpinnerWheels
           region={currentResult.region}
