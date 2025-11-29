@@ -8,6 +8,16 @@ import { api, isApiConfigured } from '../api';
 import { ApiStatusIndicator, ApiNotConfiguredBanner } from '../components/ApiStatusIndicator';
 import type { SpinResult, Region, Settings, SpinsLogPayload, RosterStudent, SpinQueueItem, SpinLogRow, Taxon, IUCN } from '../types';
 
+type TestMode = 'normal' | 'veto_region' | 'veto_taxon' | 'veto_iucn' | 'mercy';
+type ModeStats = {
+    total: number;
+    nonMercyPlantaeHits: number;        // taxon === 'Plantae' on non-mercy results
+    multiFieldChangesOnVeto: number;    // veto changed more than one ring
+    mercyFlagIssues: number;            // mercy spins missing flags
+    mercyVetoIssues: number;            // mercy spins with veto_used = true
+};
+type TestSummary = Record<TestMode, ModeStats>;
+
 function shuffleArray<T>(items: T[]): T[] {
   const arr = [...items];
   for (let i = arr.length - 1; i > 0; i--) {
@@ -57,6 +67,20 @@ export const SpinPage = () => {
   const [results, setResults] = useState<SpinLogRow[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
+
+  // Auto Test Suite State
+  const [isRunningTests, setIsRunningTests] = useState(false);
+  const [testSpinsPerMode, setTestSpinsPerMode] = useState(20);
+  const [enabledTestModes, setEnabledTestModes] = useState<Record<TestMode, boolean>>({
+    normal: true,
+    veto_region: true,
+    veto_taxon: true,
+    veto_iucn: true,
+    mercy: true,
+  });
+  const [testSummary, setTestSummary] = useState<TestSummary | null>(null);
+  const [testProgress, setTestProgress] = useState<{ done: number; total: number } | null>(null);
+  const [testErrors, setTestErrors] = useState<string[]>([]);
 
   // Generate session ID once per page load
   const sessionId = useMemo(() => randomSeed(), []);
@@ -112,6 +136,146 @@ export const SpinPage = () => {
       console.error('Failed to load settings:', err);
     });
   }, []);
+
+  const runAutoTestSuite = async () => {
+    if (!isApiConfigured()) {
+      setTestErrors(['API not configured. Cannot run tests.']);
+      return;
+    }
+
+    setIsRunningTests(true);
+    setTestErrors([]);
+    setTestSummary(null);
+
+    const modesToRun = (Object.keys(enabledTestModes) as TestMode[]).filter(m => enabledTestModes[m]);
+    const totalSpins = modesToRun.length * testSpinsPerMode;
+    
+    const summary: TestSummary = {
+      normal: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
+      veto_region: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
+      veto_taxon: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
+      veto_iucn: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
+      mercy: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
+    };
+
+    let spinsDone = 0;
+    setTestProgress({ done: 0, total: totalSpins });
+
+    try {
+      for (const mode of modesToRun) {
+        for (let i = 0; i < testSpinsPerMode; i++) {
+          let result: SpinResult;
+          let ruleFlags: string[] = [];
+          let vetoUsed = false;
+          let target: 'region' | 'taxon' | 'iucn' | null = null;
+
+          // Base spin for veto modes
+          const baseResult = spinEngine.spin({});
+
+          if (mode === 'normal') {
+            result = spinEngine.spin({});
+            ruleFlags = ['auto_test_run'];
+            if (result.taxon === 'Plantae') {
+              summary.normal.nonMercyPlantaeHits++;
+            }
+          } else if (mode === 'veto_region') {
+            target = 'region';
+            vetoUsed = true;
+            const vetoOutput = spinEngine.vetoSpinSingle(baseResult, 'region');
+            result = vetoOutput.result;
+            ruleFlags = ['auto_test_run', 'veto_respin', ...vetoOutput.ruleFlags];
+            
+            summary.veto_region.total++;
+            let changes = 0;
+            if (result.region !== baseResult.region) changes++;
+            if (result.taxon !== baseResult.taxon) changes++;
+            if (result.iucn !== baseResult.iucn) changes++;
+            if (changes !== 1) summary.veto_region.multiFieldChangesOnVeto++;
+
+          } else if (mode === 'veto_taxon') {
+            target = 'taxon';
+            vetoUsed = true;
+            const vetoOutput = spinEngine.vetoSpinSingle(baseResult, 'taxon');
+            result = vetoOutput.result;
+            ruleFlags = ['auto_test_run', 'veto_respin', ...vetoOutput.ruleFlags];
+
+            summary.veto_taxon.total++;
+            let changes = 0;
+            if (result.region !== baseResult.region) changes++;
+            if (result.taxon !== baseResult.taxon) changes++;
+            if (result.iucn !== baseResult.iucn) changes++;
+            if (changes !== 1) summary.veto_taxon.multiFieldChangesOnVeto++;
+
+          } else if (mode === 'veto_iucn') {
+            target = 'iucn';
+            vetoUsed = true;
+            const vetoOutput = spinEngine.vetoSpinSingle(baseResult, 'iucn');
+            result = vetoOutput.result;
+            ruleFlags = ['auto_test_run', 'veto_respin', ...vetoOutput.ruleFlags];
+
+            summary.veto_iucn.total++;
+            let changes = 0;
+            if (result.region !== baseResult.region) changes++;
+            if (result.taxon !== baseResult.taxon) changes++;
+            if (result.iucn !== baseResult.iucn) changes++;
+            if (changes !== 1) summary.veto_iucn.multiFieldChangesOnVeto++;
+
+          } else if (mode === 'mercy') {
+            // Mercy logic
+            const mercyRegion = REGIONS[Math.floor(Math.random() * REGIONS.length)];
+            result = {
+              ...baseResult,
+              region: mercyRegion,
+              taxon: 'Plantae',
+              plantaeMercyApplied: true,
+            };
+            ruleFlags = ['auto_test_run', 'plantae_mercy', 'wildcard_iucn'];
+            vetoUsed = false;
+
+            summary.mercy.total++;
+            if (result.taxon !== 'Plantae') summary.mercy.mercyFlagIssues++;
+            if (vetoUsed) summary.mercy.mercyVetoIssues++; // Should be false
+            if (!ruleFlags.includes('plantae_mercy') || !ruleFlags.includes('wildcard_iucn')) {
+                summary.mercy.mercyFlagIssues++;
+            }
+          } else {
+             // Should not happen
+             result = baseResult; 
+          }
+
+          const payload = buildSpinLogPayload(result, ruleFlags, {
+            vetoUsed,
+            target,
+            isTest: true
+          });
+
+          await api.logSpin(payload);
+          
+          spinsDone++;
+          setTestProgress({ done: spinsDone, total: totalSpins });
+        }
+      }
+      
+      setTestSummary(summary);
+      
+      // Check for errors to display
+      const errors: string[] = [];
+      if (summary.veto_region.multiFieldChangesOnVeto > 0) errors.push(`Veto (Region): ${summary.veto_region.multiFieldChangesOnVeto} spins changed more than one field`);
+      if (summary.veto_taxon.multiFieldChangesOnVeto > 0) errors.push(`Veto (Taxon): ${summary.veto_taxon.multiFieldChangesOnVeto} spins changed more than one field`);
+      if (summary.veto_iucn.multiFieldChangesOnVeto > 0) errors.push(`Veto (IUCN): ${summary.veto_iucn.multiFieldChangesOnVeto} spins changed more than one field`);
+      if (summary.mercy.mercyFlagIssues > 0) errors.push(`Mercy: ${summary.mercy.mercyFlagIssues} spins had flag issues`);
+      if (summary.mercy.mercyVetoIssues > 0) errors.push(`Mercy: ${summary.mercy.mercyVetoIssues} spins had veto_used=true`);
+
+      setTestErrors(errors);
+
+    } catch (e) {
+      console.error("Auto test suite failed", e);
+      setTestErrors(prev => [...prev, `Test suite failed: ${e}`]);
+    } finally {
+      setIsRunningTests(false);
+      setTestProgress(null);
+    }
+  };
 
   const handleLoadRoster = async () => {
     if (!isApiConfigured()) {
@@ -411,6 +575,81 @@ export const SpinPage = () => {
         </div>
 
         <ApiNotConfiguredBanner />
+
+        {/* Auto Test Suite Bar */}
+        {(import.meta.env.DEV || (settings as any).enableTestHarness) && (
+          <div className="bg-gray-800 text-white p-4 rounded-lg shadow-md mb-6 border border-gray-700">
+            <div className="flex flex-wrap items-center gap-4 mb-2">
+              <h3 className="font-bold text-lg text-yellow-400">🛠 Auto Test Suite</h3>
+              <div className="flex items-center gap-2">
+                <label className="text-xs uppercase font-bold text-gray-400">Spins/Mode</label>
+                <input 
+                  type="number" 
+                  value={testSpinsPerMode} 
+                  onChange={e => setTestSpinsPerMode(Math.max(1, Math.min(500, parseInt(e.target.value) || 20)))}
+                  className="w-16 px-2 py-1 text-black rounded text-sm"
+                  disabled={isRunningTests}
+                />
+              </div>
+              <button
+                onClick={runAutoTestSuite}
+                disabled={isRunningTests}
+                className="bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 text-white px-4 py-1 rounded font-bold text-sm transition-colors"
+              >
+                {isRunningTests ? `Running... (${testProgress?.done} / ${testProgress?.total})` : 'Run Auto Test Suite'}
+              </button>
+            </div>
+            
+            <div className="flex flex-wrap gap-3 text-sm mb-2">
+              {(Object.keys(enabledTestModes) as TestMode[]).map(mode => (
+                <label key={mode} className="flex items-center gap-1 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={enabledTestModes[mode]} 
+                    onChange={e => setEnabledTestModes(prev => ({ ...prev, [mode]: e.target.checked }))}
+                    disabled={isRunningTests}
+                  />
+                  <span className="capitalize">{mode.replace('_', ' ')}</span>
+                </label>
+              ))}
+            </div>
+
+            {/* Summary Panel */}
+            {testSummary && !isRunningTests && (
+              <div className="mt-3 bg-gray-900 p-3 rounded text-xs font-mono">
+                <div className="grid grid-cols-4 gap-2 font-bold border-b border-gray-700 pb-1 mb-1 text-gray-400">
+                  <div>Mode</div>
+                  <div>Total</div>
+                  <div>Issues</div>
+                  <div>Status</div>
+                </div>
+                {(Object.keys(testSummary) as TestMode[]).filter(m => enabledTestModes[m]).map(mode => {
+                   const stats = testSummary[mode];
+                   const issues = stats.multiFieldChangesOnVeto + stats.mercyFlagIssues + stats.mercyVetoIssues;
+                   const isOk = issues === 0;
+                   return (
+                     <div key={mode} className="grid grid-cols-4 gap-2">
+                       <div className="capitalize">{mode.replace('_', ' ')}</div>
+                       <div>{stats.total}</div>
+                       <div className={issues > 0 ? "text-red-400 font-bold" : "text-gray-500"}>
+                         {mode === 'normal' ? `Plantae: ${stats.nonMercyPlantaeHits}` : issues}
+                       </div>
+                       <div>{isOk ? "✅ OK" : "⚠️ Check"}</div>
+                     </div>
+                   );
+                })}
+              </div>
+            )}
+
+            {testErrors.length > 0 && (
+               <div className="mt-2 text-red-400 text-xs">
+                 <ul className="list-disc list-inside">
+                   {testErrors.map((err, i) => <li key={i}>{err}</li>)}
+                 </ul>
+               </div>
+            )}
+          </div>
+        )}
 
         {/* Queue Panel (Phase C1) */}
         <div className="bg-white p-4 rounded-lg shadow-md mb-6 border border-gray-200 max-w-4xl mx-auto">
