@@ -198,7 +198,7 @@ export const SpinPage = () => {
 
     applySpin(
       mercyResult,
-      ['plantae_mercy'],
+      ['plantae_mercy', 'wildcard_iucn'],
       false, // vetoUsed
       null // target
     );
