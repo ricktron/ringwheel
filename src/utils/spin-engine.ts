@@ -331,13 +331,25 @@ export class SpinEngine {
     let iucn = currentResult.iucn;
 
     if (target === 'region') {
-      region = this.spinRing(REGIONS, this.weights.regions);
+      if (REGIONS.length > 1) {
+        do {
+          region = this.spinRing(REGIONS, this.weights.regions);
+        } while (region === currentResult.region);
+      }
       ruleFlags.push('veto_respin_region');
     } else if (target === 'taxon') {
-      taxon = this.spinRing(TAXA, this.weights.taxa);
+      if (TAXA.length > 1) {
+        do {
+          taxon = this.spinRing(TAXA, this.weights.taxa);
+        } while (taxon === currentResult.taxon);
+      }
       ruleFlags.push('veto_respin_taxon');
     } else if (target === 'iucn') {
-      iucn = this.spinRing(IUCN_STATUS, this.weights.iucn);
+      if (IUCN_STATUS.length > 1) {
+        do {
+          iucn = this.spinRing(IUCN_STATUS, this.weights.iucn);
+        } while (iucn === currentResult.iucn);
+      }
       ruleFlags.push('veto_respin_iucn');
     }
 
@@ -345,6 +357,7 @@ export class SpinEngine {
     let plantaeMercyApplied = false;
     
     // If we are spinning IUCN and Taxon is Plantae, avoid bad statuses
+    // This runs AFTER the no-repeat selection above
     if (target === 'iucn' && options.enablePlantaeMercy && taxon === 'Plantae') {
       if (['NT', 'VU', 'EN'].includes(iucn)) {
         const safeStatuses = IUCN_STATUS.filter(s => !['NT', 'VU', 'EN'].includes(s));
