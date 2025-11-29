@@ -10,6 +10,8 @@ export const REGIONS: Region[] = [
 export const TAXA: Taxon[] = [
   'Mammalia', 'Aves', 'Reptilia', 'Amphibia',
   'Actinopterygii', 'Chondrichthyes', 'Insecta', 'Arachnida',
+  // Plantae is excluded from random spins (see spin() and vetoSpinSingle())
+  // It is only reachable via the manual Plantae Mercy UI path.
   'Plantae', 'Fungi'
 ];
 
@@ -221,7 +223,8 @@ export class SpinEngine {
     let attempts = 0;
     const maxAttempts = 100;
 
-    // Filter out Plantae from random spins
+    // Filter out Plantae from random spins.
+    // Plantae results are only set via the UI mercy path, not from the engine.
     const taxaForSpin = TAXA.filter(t => t !== 'Plantae');
 
     while (attempts < maxAttempts) {
@@ -322,7 +325,8 @@ export class SpinEngine {
       }
       ruleFlags.push('veto_respin_region');
     } else if (target === 'taxon') {
-      // Filter out Plantae from random spins
+      // Filter out Plantae from random spins.
+      // Plantae results are only set via the UI mercy path, not from the engine.
       const taxaForSpin = TAXA.filter(t => t !== 'Plantae');
       if (taxaForSpin.length > 1) {
         do {

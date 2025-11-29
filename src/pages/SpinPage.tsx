@@ -7,6 +7,30 @@ import { api, isApiConfigured } from '../api';
 import { ApiStatusIndicator, ApiNotConfiguredBanner } from '../components/ApiStatusIndicator';
 import type { SpinResult, Region, Settings, SpinsLogPayload } from '../types';
 
+const buildSpinLogPayload = (
+  result: SpinResult,
+  sessionId: string,
+  vetoUsed: boolean,
+  ruleFlags: string[]
+): SpinsLogPayload => {
+  return {
+    timestamp_iso: new Date().toISOString(),
+    session_id: sessionId,
+    // A2: Student info defaults to empty strings until student selector is implemented
+    period: '',
+    student_name: '',
+    email: '',
+    result_A: result.region,
+    result_B: result.taxon,
+    result_C: result.iucn,
+    plantae_mercy: result.plantaeMercyApplied ?? false,
+    veto_used: vetoUsed,
+    seed: randomSeed(),
+    is_test: false,
+    rule_flags_json: JSON.stringify(ruleFlags),
+  };
+};
+
 export const SpinPage = () => {
   const [spinning, setSpinning] = useState(false);
   const [currentResult, setCurrentResult] = useState<SpinResult>({
@@ -87,22 +111,7 @@ export const SpinPage = () => {
       finalRuleFlags.push('veto_respin');
     }
 
-    const payload: SpinsLogPayload = {
-      timestamp_iso: new Date().toISOString(),
-      session_id: sessionId,
-      // A2: Student info defaults to empty strings until student selector is implemented
-      period: '', 
-      student_name: '', 
-      email: '', 
-      result_A: result.region, 
-      result_B: result.taxon, 
-      result_C: result.iucn, 
-      plantae_mercy: result.plantaeMercyApplied ?? false,
-      veto_used: isVeto,
-      seed: randomSeed(),
-      is_test: false,
-      rule_flags_json: JSON.stringify(finalRuleFlags),
-    };
+    const payload = buildSpinLogPayload(result, sessionId, isVeto, finalRuleFlags);
 
     if (isApiConfigured()) {
       api.logSpin(payload).then(() => {
@@ -190,6 +199,15 @@ export const SpinPage = () => {
     setShowRegionPicker(true);
   };
 
+  /**
+   * Plantae Mercy Contract:
+   * - It forces taxon to 'Plantae'.
+   * - It sets region from the mercy region picker.
+   * - It leaves iucn as-is (for now).
+   * - It sets plantaeMercyApplied / plantae_mercy true.
+   * - It passes ['plantae_mercy', 'wildcard_iucn'] as rule flags.
+   * - It does not set veto_used and does not call veto spin logic.
+   */
   const applyPlantaeMercy = (chosenRegionKey: Region) => {
     const mercyResult: SpinResult = {
       ...currentResult,

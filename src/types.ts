@@ -34,6 +34,35 @@ export interface SpinResultNew {
   is_test: boolean;
 }
 
+export interface RosterStudent {
+  email: string;
+  first: string;
+  last: string;
+  class: string;
+  s1Period: string | null;
+  s2Period: string | null;
+}
+
+export interface SpinQueueItem {
+  email: string;
+  name: string;
+  period: string;
+  hasSpun: boolean;
+}
+
+export interface SpinLogRow {
+  timestamp_iso: string;
+  student_name: string;
+  email: string;
+  period: string;
+  result_region: string;
+  result_taxon: string;
+  result_iucn: string;
+  plantae_mercy: boolean;
+  veto_used: boolean;
+  rule_flags: string[];
+}
+
 export interface SpinsLogPayload {
   timestamp_iso: string;
   session_id: string;
