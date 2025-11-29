@@ -9,7 +9,7 @@
  * - VITE_SPIN_API_TOKEN: The API token for authentication
  */
 
-import type { RingSlice, SettingRow, SpinsLogPayload } from './types';
+import type { RingSlice, SettingRow, SpinsLogPayload, RosterStudent } from './types';
 
 const base = import.meta.env.VITE_SPIN_API_URL || '';
 const token = import.meta.env.VITE_SPIN_API_TOKEN || '';
@@ -57,7 +57,7 @@ async function post<T>(body: unknown): Promise<T> {
  */
 export const api = {
   health: () => get<{ status: string }>('health'),
-  roster: () => get<Record<string, unknown>[]>('roster'),
+  roster: () => get<RosterStudent[]>('roster'),
   rings: () => get<RingSlice[]>('rings'),
   settings: () => get<SettingRow[]>('settings'),
   logSpin: (payload: SpinsLogPayload) =>

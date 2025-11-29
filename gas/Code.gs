@@ -45,7 +45,7 @@ function doGet(e) {
     case 'health':
       return json({ status: 'ok' });
     case 'roster':
-      return json(readSheet(ss, 'Roster'));
+      return json(getRosterData(ss));
     case 'rings':
       return json(readSheet(ss, 'Rings'));
     case 'settings':
@@ -142,6 +142,29 @@ function safeParseJSON(value, fallback) {
   } catch (e) {
     return fallback;
   }
+}
+
+/**
+ * Canonical roster contract mirrored by RosterStudent TypeScript type.
+ */
+function getRosterData(ss) {
+  const sheet = ss.getSheetByName('Roster');
+  if (!sheet) return [];
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return [];
+  const headers = values[0];
+  const idx = (name) => headers.indexOf(name);
+
+  return values.slice(1)
+    .filter(row => row[idx('email')]) // skip empty rows
+    .map(row => ({
+      email: String(row[idx('email')] || ''),
+      first: String(row[idx('first')] || ''),
+      last: String(row[idx('last')] || ''),
+      class: String(row[idx('class')] || ''),
+      s1Period: row[idx('S1 Period')] ? String(row[idx('S1 Period')]) : null,
+      s2Period: row[idx('S2 Period')] ? String(row[idx('S2 Period')]) : null,
+    }));
 }
 
 /**
