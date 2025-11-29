@@ -19,7 +19,7 @@ const Ring = ({ items, currentIndex, spinning, label, color, onClick, isSelected
     >
       <div className={`text-sm font-semibold mb-2 ${color} ${isSelected ? 'underline decoration-2 underline-offset-4' : ''}`}>{label}</div>
       <div 
-        className={`relative w-48 h-48 border-4 rounded-full flex items-center justify-center bg-white shadow-lg transition-all ${isSelected ? 'ring-4 ring-offset-2 ring-blue-400 border-blue-500' : ''}`} 
+        className={`relative w-48 h-48 border-4 rounded-full flex items-center justify-center bg-white shadow-lg transition-all ${isSelected ? 'ring-4 ring-offset-2 ring-red-400 border-red-600 scale-105' : ''}`} 
         style={{ borderColor: isSelected ? undefined : color.replace('text-', '') }}
       >
         <div className="text-center">

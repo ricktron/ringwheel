@@ -28,6 +28,8 @@ export const SpinPage = () => {
   const [vetoUsed, setVetoUsed] = useState(false);
   const [vetoTarget, setVetoTarget] = useState<'region' | 'taxon' | 'iucn' | null>(null);
   const [vetoWarning, setVetoWarning] = useState<string | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
+  const [lastLoggedRow, setLastLoggedRow] = useState<SpinsLogPayload | null>(null);
 
   // Generate session ID once per page load
   const sessionId = useMemo(() => randomSeed(), []);
@@ -103,7 +105,9 @@ export const SpinPage = () => {
     };
 
     if (isApiConfigured()) {
-      api.logSpin(payload).catch(err => {
+      api.logSpin(payload).then(() => {
+        setLastLoggedRow(payload);
+      }).catch(err => {
         console.error('Failed to log spin:', err);
       });
     } else {
@@ -224,6 +228,16 @@ export const SpinPage = () => {
 
   const showPlantaeMercyButton = settings.enablePlantaeMercy;
 
+  const getSpinModeLabel = () => {
+    if (showRegionPicker) return "Plantae Mercy";
+    if (vetoTarget) {
+      if (vetoTarget === 'region') return "Veto (Region)";
+      if (vetoTarget === 'taxon') return "Veto (Taxon)";
+      if (vetoTarget === 'iucn') return "Veto (IUCN)";
+    }
+    return "Normal";
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50 p-8">
       <div className="max-w-6xl mx-auto">
@@ -254,6 +268,16 @@ export const SpinPage = () => {
               {vetoWarning}
             </div>
           )}
+
+          <div className="flex justify-center mb-2">
+            <span className={`px-3 py-1 rounded-full text-sm font-bold border ${
+              getSpinModeLabel() === 'Normal' 
+                ? 'bg-gray-100 text-gray-600 border-gray-200' 
+                : 'bg-yellow-100 text-yellow-800 border-yellow-200'
+            }`}>
+              Mode: {getSpinModeLabel()}
+            </span>
+          </div>
           
           <div className="flex justify-center gap-4">
             <button
@@ -282,6 +306,51 @@ export const SpinPage = () => {
               </button>
             )}
           </div>
+        </div>
+
+        <div className="mt-12 border-t pt-4">
+          <button 
+            onClick={() => setShowDebug(!showDebug)}
+            className="text-xs text-gray-400 hover:text-gray-600 underline mb-2"
+          >
+            {showDebug ? 'Hide Debug Panel' : 'Show Debug Panel'}
+          </button>
+          
+          {showDebug && (
+            <div className="bg-gray-100 p-4 rounded text-xs font-mono overflow-auto border border-gray-300">
+              <h3 className="font-bold mb-2 text-gray-700">Last Logged Spin</h3>
+              {lastLoggedRow ? (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                  <div><span className="font-semibold">Timestamp:</span> {lastLoggedRow.timestamp_iso}</div>
+                  <div><span className="font-semibold">Student:</span> {lastLoggedRow.student_name || '(none)'}</div>
+                  <div><span className="font-semibold">Email:</span> {lastLoggedRow.email || '(none)'}</div>
+                  <div><span className="font-semibold">Period:</span> {lastLoggedRow.period || '(none)'}</div>
+                  <div className="col-span-2 border-t border-gray-200 my-1"></div>
+                  <div><span className="font-semibold">Result A:</span> {lastLoggedRow.result_A}</div>
+                  <div><span className="font-semibold">Result B:</span> {lastLoggedRow.result_B}</div>
+                  <div><span className="font-semibold">Result C:</span> {lastLoggedRow.result_C}</div>
+                  <div><span className="font-semibold">Mercy:</span> {lastLoggedRow.plantae_mercy ? 'Yes' : 'No'}</div>
+                  <div><span className="font-semibold">Veto Used:</span> {lastLoggedRow.veto_used ? 'Yes' : 'No'}</div>
+                  <div className="col-span-2 border-t border-gray-200 my-1"></div>
+                  <div className="col-span-2">
+                    <span className="font-semibold">Rule Flags:</span>
+                    <ul className="list-disc list-inside ml-2 mt-1">
+                      {(() => {
+                        try {
+                          const flags = JSON.parse(lastLoggedRow.rule_flags_json);
+                          return Array.isArray(flags) ? flags.map((f: string, i: number) => <li key={i}>{f}</li>) : <li>Invalid JSON</li>;
+                        } catch {
+                          return <li>Error parsing JSON</li>;
+                        }
+                      })()}
+                    </ul>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-gray-500 italic">No spin logged yet this session.</div>
+              )}
+            </div>
+          )}
         </div>
 
         {showRegionPicker && (
