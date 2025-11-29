@@ -139,17 +139,15 @@ export const SpinPage = () => {
         let ruleFlags: string[] = [];
 
         if (isVetoRespin && target) {
-           const vetoOutput = spinEngine.vetoSpinSingle(currentResult, target, { enablePlantaeMercy: settings.enablePlantaeMercy });
+           const vetoOutput = spinEngine.vetoSpinSingle(currentResult, target);
            result = vetoOutput.result;
            ruleFlags = vetoOutput.ruleFlags;
            AudioService.playVeto();
         } else {
            const spinOptions = {
-             enablePlantaeMercy: settings.enablePlantaeMercy,
              manualRegion,
            };
            result = spinEngine.spin(spinOptions);
-           if (result.plantaeMercyApplied) ruleFlags.push('plantae_mercy');
            if (result.manualRegion) ruleFlags.push('manual_region');
            AudioService.playWin();
         }
@@ -187,16 +185,43 @@ export const SpinPage = () => {
     setShowRegionPicker(true);
   };
 
-  const handleRegionSelect = (region: Region) => {
-    setManualRegion(region);
-    setShowRegionPicker(false);
-    executeSpin(false, null); // Regular spin with manual region
+  const applyPlantaeMercy = (chosenRegionKey: Region) => {
+    const mercyResult: SpinResult = {
+      ...currentResult,
+      region: chosenRegionKey,
+      taxon: 'Plantae',
+      // keep the current IUCN or later let the user pick a new one
+      timestamp: Date.now(),
+      plantaeMercyApplied: true,
+      manualRegion: undefined, // It's manual but handled via mercy path
+    };
+
+    applySpin(
+      mercyResult,
+      ['plantae_mercy'],
+      false, // vetoUsed
+      null // target
+    );
+
+    // Extra celebration for mercy
+    AudioService.playWin(); // Or playPlantaeMercy if available
+    if (settings.enableConfetti) {
+      confetti({
+        particleCount: 200,
+        spread: 100,
+        origin: { y: 0.6 },
+        colors: ['#4CAF50', '#8BC34A', '#CDDC39'], // Greenish colors
+      });
+    }
   };
 
-  const showPlantaeMercyButton = 
-    settings.enablePlantaeMercy && 
-    currentResult.taxon === 'Plantae' && 
-    ['NT', 'VU', 'EN'].includes(currentResult.iucn);
+  const handleRegionSelect = (region: Region) => {
+    // setManualRegion(region); // No longer needed for mercy path
+    setShowRegionPicker(false);
+    applyPlantaeMercy(region);
+  };
+
+  const showPlantaeMercyButton = settings.enablePlantaeMercy;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50 p-8">

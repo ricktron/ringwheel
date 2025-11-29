@@ -165,21 +165,13 @@ export function planSpin(
     flags.push('random_event_sparkles');
   }
 
-  // Check for Plantae Mercy condition
-  let plantaeMercy = false;
-  if (pickB.value.label.includes('Plantae') && 
-      ['NT', 'VU', 'EN'].some(status => pickC.value.label.includes(status))) {
-    plantaeMercy = true;
-    flags.push('plantae_mercy');
-  }
-
   const results: SpinResultNew = {
     A: pickA.value.label,
     B: pickB.value.label,
     C: pickC.value.label,
     seed,
     flags: [...flags],
-    plantae_mercy: plantaeMercy,
+    plantae_mercy: false,
     veto_used: false,
     is_test: false,
   };
@@ -201,7 +193,6 @@ export interface SpinOptions {
   pairCapPercent?: number;
   vetoedPairs?: Set<string>;
   vetoedTriples?: Set<string>;
-  enablePlantaeMercy?: boolean;
   manualRegion?: Region;
 }
 
@@ -223,7 +214,6 @@ export class SpinEngine {
    * Perform a single spin across all three rings
    */
   spin(options: { 
-    enablePlantaeMercy?: boolean; 
     manualRegion?: Region;
     manualTaxon?: Taxon;
     manualIUCN?: IUCN;
@@ -231,12 +221,15 @@ export class SpinEngine {
     let attempts = 0;
     const maxAttempts = 100;
 
+    // Filter out Plantae from random spins
+    const taxaForSpin = TAXA.filter(t => t !== 'Plantae');
+
     while (attempts < maxAttempts) {
       attempts++;
 
       // Spin each ring
       const region = options.manualRegion || this.spinRing(REGIONS, this.weights.regions);
-      const taxon = options.manualTaxon || this.spinRing(TAXA, this.weights.taxa);
+      const taxon = options.manualTaxon || this.spinRing(taxaForSpin, this.weights.taxa);
       let iucn = options.manualIUCN || this.spinRing(IUCN_STATUS, this.weights.iucn);
 
       const pairKey = `${region}:${taxon}`;
@@ -257,21 +250,12 @@ export class SpinEngine {
         continue;
       }
 
-      // Apply Plantae Mercy rule
-      let plantaeMercyApplied = false;
-      if (options.enablePlantaeMercy && taxon === 'Plantae' && ['NT', 'VU', 'EN'].includes(iucn)) {
-        // Re-roll IUCN status, avoiding C statuses
-        const safeStatuses = IUCN_STATUS.filter(s => !['NT', 'VU', 'EN'].includes(s));
-        iucn = safeStatuses[CryptoRNG.getRandomInt(safeStatuses.length)];
-        plantaeMercyApplied = true;
-      }
-
       const result: SpinResult = {
         region,
         taxon,
         iucn,
         timestamp: Date.now(),
-        plantaeMercyApplied,
+        plantaeMercyApplied: false,
         manualRegion: options.manualRegion,
       };
 
@@ -321,7 +305,7 @@ export class SpinEngine {
   vetoSpinSingle(
     currentResult: SpinResult,
     target: 'region' | 'taxon' | 'iucn',
-    options: { enablePlantaeMercy?: boolean } = {}
+    options: { } = {}
   ): { result: SpinResult; ruleFlags: string[] } {
     const ruleFlags: string[] = [];
     
@@ -338,9 +322,11 @@ export class SpinEngine {
       }
       ruleFlags.push('veto_respin_region');
     } else if (target === 'taxon') {
-      if (TAXA.length > 1) {
+      // Filter out Plantae from random spins
+      const taxaForSpin = TAXA.filter(t => t !== 'Plantae');
+      if (taxaForSpin.length > 1) {
         do {
-          taxon = this.spinRing(TAXA, this.weights.taxa);
+          taxon = this.spinRing(taxaForSpin, this.weights.taxa);
         } while (taxon === currentResult.taxon);
       }
       ruleFlags.push('veto_respin_taxon');
@@ -353,30 +339,13 @@ export class SpinEngine {
       ruleFlags.push('veto_respin_iucn');
     }
 
-    // Apply Plantae Mercy rule logic for single ring spins
-    let plantaeMercyApplied = false;
-    
-    // If we are spinning IUCN and Taxon is Plantae, avoid bad statuses
-    // This runs AFTER the no-repeat selection above
-    if (target === 'iucn' && options.enablePlantaeMercy && taxon === 'Plantae') {
-      if (['NT', 'VU', 'EN'].includes(iucn)) {
-        const safeStatuses = IUCN_STATUS.filter(s => !['NT', 'VU', 'EN'].includes(s));
-        iucn = safeStatuses[CryptoRNG.getRandomInt(safeStatuses.length)];
-        plantaeMercyApplied = true;
-      }
-    }
-
-    // Note: If target is 'taxon' and we land on Plantae, we do NOT change IUCN 
-    // to preserve the "single ring" behavior, even if IUCN is in a mercy state.
-    // This differs slightly from triple spin but respects the veto constraint.
-
     return {
       result: {
         region,
         taxon,
         iucn,
         timestamp: Date.now(),
-        plantaeMercyApplied,
+        plantaeMercyApplied: false,
         manualRegion: currentResult.manualRegion
       },
       ruleFlags
