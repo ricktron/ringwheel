@@ -88,6 +88,7 @@ export const SpinPage = () => {
     const payload: SpinsLogPayload = {
       timestamp_iso: new Date().toISOString(),
       session_id: sessionId,
+      // A2: Student info defaults to empty strings until student selector is implemented
       period: '', 
       student_name: '', 
       email: '', 

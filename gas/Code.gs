@@ -22,6 +22,14 @@
 const TOKEN = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
 const SHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
 
+// A1: Freeze sheet schemas
+const SheetHeaders = {
+  ROSTER: ['email','first','last','class','S1 Period','S2 Period'],
+  RINGS: ['ring_name','label','color_hex','weight','order_index','active'],
+  SETTINGS: ['key','value','notes'],
+  SPINS_LOG: ['timestamp_iso','session_id','period','student_name','email','result_A','result_B','result_C','plantae_mercy','veto_used','seed','is_test','rule_flags_json']
+};
+
 /**
  * Handle GET requests
  */
@@ -62,7 +70,21 @@ function doPost(e) {
   
   switch (type) {
     case 'logspin':
-      appendRow(ss, 'SpinsLog', body.payload || {});
+      // A2: Ensure student info and period are mapped
+      // Expected payload: { student_name, email, period, ... }
+      const logPayload = body.payload || {};
+      
+      // Ensure defaults for A2 fields
+      logPayload.student_name = logPayload.student_name || '';
+      logPayload.email = logPayload.email || '';
+      logPayload.period = logPayload.period || '';
+
+      // Ensure rule_flags_json is stringified
+      if (logPayload.rule_flags_json && typeof logPayload.rule_flags_json !== 'string') {
+        logPayload.rule_flags_json = JSON.stringify(logPayload.rule_flags_json);
+      }
+
+      appendRow(ss, 'SpinsLog', logPayload);
       return json({ ok: true });
     case 'writerings':
       writeRows(ss, 'Rings', body.rows || []);
@@ -99,6 +121,29 @@ function parseBody(e) {
   return {};
 }
 
+// A1: Helper to get headers
+function getHeaders(sheet) {
+  const data = sheet.getDataRange().getValues();
+  return data.length > 0 ? data[0] : [];
+}
+
+// A1: Helper to get header index
+function getHeaderIndex(headers, name) {
+  const index = headers.indexOf(name);
+  if (index === -1) throw new Error('Header not found: ' + name);
+  return index;
+}
+
+// A1: Helper to safely parse JSON
+function safeParseJSON(value, fallback) {
+  if (value === '' || value === null || value === undefined) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch (e) {
+    return fallback;
+  }
+}
+
 /**
  * Read sheet data as array of objects
  * First row is headers; subsequent rows map to objects
@@ -127,7 +172,12 @@ function readSheet(ss, name) {
     
     const obj = {};
     headers.forEach((header, index) => {
-      obj[header] = row[index];
+      let val = row[index];
+      // A1: Parse rule_flags_json
+      if (header === 'rule_flags_json') {
+        val = safeParseJSON(val, []);
+      }
+      obj[header] = val;
     });
     result.push(obj);
   }
@@ -152,11 +202,23 @@ function writeRows(ss, name, rows) {
     return;
   }
   
-  const headers = Object.keys(rows[0]);
+  // A1: Use frozen headers if available
+  let headers = [];
+  if (name === 'Rings') headers = SheetHeaders.RINGS;
+  else if (name === 'Settings') headers = SheetHeaders.SETTINGS;
+  else headers = Object.keys(rows[0]);
+  
   sheet.appendRow(headers);
   
   for (const row of rows) {
-    const values = headers.map(h => row[h] !== undefined ? row[h] : '');
+    const values = headers.map(h => {
+      let val = row[h];
+      // A1: Ensure rule_flags_json is stringified
+      if (h === 'rule_flags_json' && val !== undefined && typeof val !== 'string') {
+        val = JSON.stringify(val);
+      }
+      return val !== undefined ? val : '';
+    });
     sheet.appendRow(values);
   }
 }
@@ -172,11 +234,18 @@ function appendRow(ss, name, payload) {
   }
   
   const data = sheet.getDataRange().getValues();
-  if (data.length === 0) {
+  let headers = [];
+  
+  if (data.length > 0) {
+    headers = data[0];
+  } else if (name === 'SpinsLog') {
+    // If empty, initialize with frozen headers
+    headers = SheetHeaders.SPINS_LOG;
+    sheet.appendRow(headers);
+  } else {
     return;
   }
   
-  const headers = data[0];
   const values = headers.map(h => payload[h] !== undefined ? payload[h] : '');
   sheet.appendRow(values);
 }
