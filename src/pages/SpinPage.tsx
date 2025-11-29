@@ -11,12 +11,17 @@ import type { SpinResult, Region, Settings, SpinsLogPayload, RosterStudent, Spin
 type TestMode = 'normal' | 'veto_region' | 'veto_taxon' | 'veto_iucn' | 'mercy';
 type ModeStats = {
     total: number;
-    nonMercyPlantaeHits: number;        // taxon === 'Plantae' on non-mercy results
-    multiFieldChangesOnVeto: number;    // veto changed more than one ring
-    mercyFlagIssues: number;            // mercy spins missing flags
-    mercyVetoIssues: number;            // mercy spins with veto_used = true
+    errorCount: number;
 };
 type TestSummary = Record<TestMode, ModeStats>;
+type TestError = { mode: TestMode; message: string };
+
+const REGIONS_FOR_TEST: Region[] = ['Palearctic', 'Nearctic', 'Neotropical', 'Afrotropical', 'Indomalayan', 'Australasian', 'Antarctic', 'Oceanic'];
+
+function randomRegionForTest(): Region {
+  const idx = Math.floor(Math.random() * REGIONS_FOR_TEST.length);
+  return REGIONS_FOR_TEST[idx];
+}
 
 function shuffleArray<T>(items: T[]): T[] {
   const arr = [...items];
@@ -70,6 +75,7 @@ export const SpinPage = () => {
 
   // Auto Test Suite State
   const [isRunningTests, setIsRunningTests] = useState(false);
+  const [logTestsToSheet, setLogTestsToSheet] = useState<boolean>(true);
   const [testSpinsPerMode, setTestSpinsPerMode] = useState(20);
   const [enabledTestModes, setEnabledTestModes] = useState<Record<TestMode, boolean>>({
     normal: true,
@@ -80,7 +86,7 @@ export const SpinPage = () => {
   });
   const [testSummary, setTestSummary] = useState<TestSummary | null>(null);
   const [testProgress, setTestProgress] = useState<{ done: number; total: number } | null>(null);
-  const [testErrors, setTestErrors] = useState<string[]>([]);
+  const [testErrors, setTestErrors] = useState<TestError[]>([]);
 
   // Generate session ID once per page load
   const sessionId = useMemo(() => randomSeed(), []);
@@ -139,7 +145,7 @@ export const SpinPage = () => {
 
   const runAutoTestSuite = async () => {
     if (!isApiConfigured()) {
-      setTestErrors(['API not configured. Cannot run tests.']);
+      setTestErrors([{ mode: 'normal', message: 'API not configured. Cannot run tests.' }]);
       return;
     }
 
@@ -151,11 +157,19 @@ export const SpinPage = () => {
     const totalSpins = modesToRun.length * testSpinsPerMode;
     
     const summary: TestSummary = {
-      normal: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
-      veto_region: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
-      veto_taxon: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
-      veto_iucn: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
-      mercy: { total: 0, nonMercyPlantaeHits: 0, multiFieldChangesOnVeto: 0, mercyFlagIssues: 0, mercyVetoIssues: 0 },
+      normal: { total: 0, errorCount: 0 },
+      veto_region: { total: 0, errorCount: 0 },
+      veto_taxon: { total: 0, errorCount: 0 },
+      veto_iucn: { total: 0, errorCount: 0 },
+      mercy: { total: 0, errorCount: 0 },
+    };
+
+    const errors: TestError[] = [];
+    const MAX_ERRORS_PER_MODE = 10;
+
+    const recordError = (mode: TestMode, message: string) => {
+      errors.push({ mode, message });
+      summary[mode].errorCount++;
     };
 
     let spinsDone = 0;
@@ -164,6 +178,12 @@ export const SpinPage = () => {
     try {
       for (const mode of modesToRun) {
         for (let i = 0; i < testSpinsPerMode; i++) {
+          // Early abort if too many errors in this mode
+          if (summary[mode].errorCount >= MAX_ERRORS_PER_MODE) {
+            recordError(mode, `Aborted after ${MAX_ERRORS_PER_MODE} errors`);
+            break;
+          }
+
           let result: SpinResult;
           let ruleFlags: string[] = [];
           let vetoUsed = false;
@@ -175,9 +195,21 @@ export const SpinPage = () => {
           if (mode === 'normal') {
             result = spinEngine.spin({});
             ruleFlags = ['auto_test_run'];
+            
+            // Invariants
             if (result.taxon === 'Plantae') {
-              summary.normal.nonMercyPlantaeHits++;
+              recordError('normal', `Got Plantae in normal mode: ${JSON.stringify(result)}`);
             }
+
+            const forbiddenFlags = ['veto_respin', 'veto_respin_region', 'veto_respin_taxon', 'veto_respin_iucn', 'plantae_mercy', 'wildcard_iucn'];
+            for (const flag of forbiddenFlags) {
+              if (ruleFlags.includes(flag)) {
+                recordError('normal', `Forbidden flag ${flag} in normal mode`);
+              }
+            }
+
+            summary.normal.total++;
+
           } else if (mode === 'veto_region') {
             target = 'region';
             vetoUsed = true;
@@ -186,11 +218,16 @@ export const SpinPage = () => {
             ruleFlags = ['auto_test_run', 'veto_respin', ...vetoOutput.ruleFlags];
             
             summary.veto_region.total++;
-            let changes = 0;
-            if (result.region !== baseResult.region) changes++;
-            if (result.taxon !== baseResult.taxon) changes++;
-            if (result.iucn !== baseResult.iucn) changes++;
-            if (changes !== 1) summary.veto_region.multiFieldChangesOnVeto++;
+
+            // Invariants
+            if (result.region === baseResult.region) recordError('veto_region', 'Region did not change');
+            if (result.taxon !== baseResult.taxon) recordError('veto_region', 'Taxon changed unexpectedly');
+            if (result.iucn !== baseResult.iucn) recordError('veto_region', 'IUCN changed unexpectedly');
+            
+            if (!ruleFlags.includes('veto_respin')) recordError('veto_region', 'Missing veto_respin flag');
+            if (!ruleFlags.includes('veto_respin_region')) recordError('veto_region', 'Missing veto_respin_region flag');
+            if (ruleFlags.includes('plantae_mercy')) recordError('veto_region', 'Unexpected plantae_mercy flag');
+            if (ruleFlags.includes('wildcard_iucn')) recordError('veto_region', 'Unexpected wildcard_iucn flag');
 
           } else if (mode === 'veto_taxon') {
             target = 'taxon';
@@ -200,11 +237,16 @@ export const SpinPage = () => {
             ruleFlags = ['auto_test_run', 'veto_respin', ...vetoOutput.ruleFlags];
 
             summary.veto_taxon.total++;
-            let changes = 0;
-            if (result.region !== baseResult.region) changes++;
-            if (result.taxon !== baseResult.taxon) changes++;
-            if (result.iucn !== baseResult.iucn) changes++;
-            if (changes !== 1) summary.veto_taxon.multiFieldChangesOnVeto++;
+
+            // Invariants
+            if (result.taxon === baseResult.taxon) recordError('veto_taxon', 'Taxon did not change');
+            if (result.region !== baseResult.region) recordError('veto_taxon', 'Region changed unexpectedly');
+            if (result.iucn !== baseResult.iucn) recordError('veto_taxon', 'IUCN changed unexpectedly');
+
+            if (!ruleFlags.includes('veto_respin')) recordError('veto_taxon', 'Missing veto_respin flag');
+            if (!ruleFlags.includes('veto_respin_taxon')) recordError('veto_taxon', 'Missing veto_respin_taxon flag');
+            if (ruleFlags.includes('plantae_mercy')) recordError('veto_taxon', 'Unexpected plantae_mercy flag');
+            if (ruleFlags.includes('wildcard_iucn')) recordError('veto_taxon', 'Unexpected wildcard_iucn flag');
 
           } else if (mode === 'veto_iucn') {
             target = 'iucn';
@@ -214,29 +256,42 @@ export const SpinPage = () => {
             ruleFlags = ['auto_test_run', 'veto_respin', ...vetoOutput.ruleFlags];
 
             summary.veto_iucn.total++;
-            let changes = 0;
-            if (result.region !== baseResult.region) changes++;
-            if (result.taxon !== baseResult.taxon) changes++;
-            if (result.iucn !== baseResult.iucn) changes++;
-            if (changes !== 1) summary.veto_iucn.multiFieldChangesOnVeto++;
+
+            // Invariants
+            if (result.iucn === baseResult.iucn) recordError('veto_iucn', 'IUCN did not change');
+            if (result.region !== baseResult.region) recordError('veto_iucn', 'Region changed unexpectedly');
+            if (result.taxon !== baseResult.taxon) recordError('veto_iucn', 'Taxon changed unexpectedly');
+
+            if (!ruleFlags.includes('veto_respin')) recordError('veto_iucn', 'Missing veto_respin flag');
+            if (!ruleFlags.includes('veto_respin_iucn')) recordError('veto_iucn', 'Missing veto_respin_iucn flag');
+            if (ruleFlags.includes('plantae_mercy')) recordError('veto_iucn', 'Unexpected plantae_mercy flag');
+            if (ruleFlags.includes('wildcard_iucn')) recordError('veto_iucn', 'Unexpected wildcard_iucn flag');
 
           } else if (mode === 'mercy') {
             // Mercy logic
-            const mercyRegion = REGIONS[Math.floor(Math.random() * REGIONS.length)];
+            const mercyRegion = randomRegionForTest();
             result = {
               ...baseResult,
               region: mercyRegion,
               taxon: 'Plantae',
               plantaeMercyApplied: true,
+              timestamp: Date.now(),
             };
             ruleFlags = ['auto_test_run', 'plantae_mercy', 'wildcard_iucn'];
             vetoUsed = false;
 
             summary.mercy.total++;
-            if (result.taxon !== 'Plantae') summary.mercy.mercyFlagIssues++;
-            if (vetoUsed) summary.mercy.mercyVetoIssues++; // Should be false
-            if (!ruleFlags.includes('plantae_mercy') || !ruleFlags.includes('wildcard_iucn')) {
-                summary.mercy.mercyFlagIssues++;
+
+            // Invariants
+            if (result.taxon !== 'Plantae') recordError('mercy', 'Taxon is not Plantae');
+            if (!ruleFlags.includes('plantae_mercy')) recordError('mercy', 'Missing plantae_mercy flag');
+            if (!ruleFlags.includes('wildcard_iucn')) recordError('mercy', 'Missing wildcard_iucn flag');
+            
+            const forbiddenFlags = ['veto_respin', 'veto_respin_region', 'veto_respin_taxon', 'veto_respin_iucn'];
+            for (const flag of forbiddenFlags) {
+                if (ruleFlags.includes(flag)) {
+                    recordError('mercy', `Forbidden flag ${flag} in mercy mode`);
+                }
             }
           } else {
              // Should not happen
@@ -249,7 +304,9 @@ export const SpinPage = () => {
             isTest: true
           });
 
-          await api.logSpin(payload);
+          if (logTestsToSheet && isApiConfigured()) {
+            await api.logSpin(payload);
+          }
           
           spinsDone++;
           setTestProgress({ done: spinsDone, total: totalSpins });
@@ -257,20 +314,11 @@ export const SpinPage = () => {
       }
       
       setTestSummary(summary);
-      
-      // Check for errors to display
-      const errors: string[] = [];
-      if (summary.veto_region.multiFieldChangesOnVeto > 0) errors.push(`Veto (Region): ${summary.veto_region.multiFieldChangesOnVeto} spins changed more than one field`);
-      if (summary.veto_taxon.multiFieldChangesOnVeto > 0) errors.push(`Veto (Taxon): ${summary.veto_taxon.multiFieldChangesOnVeto} spins changed more than one field`);
-      if (summary.veto_iucn.multiFieldChangesOnVeto > 0) errors.push(`Veto (IUCN): ${summary.veto_iucn.multiFieldChangesOnVeto} spins changed more than one field`);
-      if (summary.mercy.mercyFlagIssues > 0) errors.push(`Mercy: ${summary.mercy.mercyFlagIssues} spins had flag issues`);
-      if (summary.mercy.mercyVetoIssues > 0) errors.push(`Mercy: ${summary.mercy.mercyVetoIssues} spins had veto_used=true`);
-
       setTestErrors(errors);
 
     } catch (e) {
       console.error("Auto test suite failed", e);
-      setTestErrors(prev => [...prev, `Test suite failed: ${e}`]);
+      setTestErrors(prev => [...prev, { mode: 'normal', message: `Test suite failed: ${e}` }]);
     } finally {
       setIsRunningTests(false);
       setTestProgress(null);
@@ -612,6 +660,15 @@ export const SpinPage = () => {
                   <span className="capitalize">{mode.replace('_', ' ')}</span>
                 </label>
               ))}
+              <label className="flex items-center gap-1 text-xs ml-4 border-l pl-4 border-gray-600">
+                <input
+                  type="checkbox"
+                  checked={logTestsToSheet}
+                  onChange={(e) => setLogTestsToSheet(e.target.checked)}
+                  disabled={isRunningTests}
+                />
+                Log test spins to sheet
+              </label>
             </div>
 
             {/* Summary Panel */}
@@ -620,21 +677,20 @@ export const SpinPage = () => {
                 <div className="grid grid-cols-4 gap-2 font-bold border-b border-gray-700 pb-1 mb-1 text-gray-400">
                   <div>Mode</div>
                   <div>Total</div>
-                  <div>Issues</div>
+                  <div>Errors</div>
                   <div>Status</div>
                 </div>
                 {(Object.keys(testSummary) as TestMode[]).filter(m => enabledTestModes[m]).map(mode => {
                    const stats = testSummary[mode];
-                   const issues = stats.multiFieldChangesOnVeto + stats.mercyFlagIssues + stats.mercyVetoIssues;
-                   const isOk = issues === 0;
+                   const isOk = stats.errorCount === 0;
                    return (
                      <div key={mode} className="grid grid-cols-4 gap-2">
                        <div className="capitalize">{mode.replace('_', ' ')}</div>
                        <div>{stats.total}</div>
-                       <div className={issues > 0 ? "text-red-400 font-bold" : "text-gray-500"}>
-                         {mode === 'normal' ? `Plantae: ${stats.nonMercyPlantaeHits}` : issues}
+                       <div className={stats.errorCount > 0 ? "text-red-400 font-bold" : "text-gray-500"}>
+                         {stats.errorCount}
                        </div>
-                       <div>{isOk ? "✅ OK" : "⚠️ Check"}</div>
+                       <div>{isOk ? "✅ OK" : "❌ FAIL"}</div>
                      </div>
                    );
                 })}
@@ -642,11 +698,16 @@ export const SpinPage = () => {
             )}
 
             {testErrors.length > 0 && (
-               <div className="mt-2 text-red-400 text-xs">
-                 <ul className="list-disc list-inside">
-                   {testErrors.map((err, i) => <li key={i}>{err}</li>)}
-                 </ul>
-               </div>
+              <div className="mt-2 text-xs max-h-40 overflow-auto border-t pt-2 border-gray-700">
+                <div className="font-semibold mb-1 text-red-400">Errors</div>
+                <ul className="list-disc list-inside space-y-0.5 text-red-300">
+                  {testErrors.map((err, idx) => (
+                    <li key={idx}>
+                      <strong>{err.mode}:</strong> {err.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
         )}
