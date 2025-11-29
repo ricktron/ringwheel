@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo } from 'react';
 import confetti from 'canvas-confetti';
 import { SpinnerWheels } from '../components/SpinnerWheels';
+import { ResultsPanel } from '../components/ResultsPanel';
 import { SpinEngine, REGIONS, TAXA, IUCN_STATUS, randomSeed } from '../utils/spin-engine';
 import { AudioService } from '../services/audio';
 import { api, isApiConfigured } from '../api';
 import { ApiStatusIndicator, ApiNotConfiguredBanner } from '../components/ApiStatusIndicator';
-import type { SpinResult, Region, Settings, SpinsLogPayload, RosterStudent, SpinQueueItem } from '../types';
+import type { SpinResult, Region, Settings, SpinsLogPayload, RosterStudent, SpinQueueItem, SpinLogRow, Taxon, IUCN } from '../types';
 
 function shuffleArray<T>(items: T[]): T[] {
   const arr = [...items];
@@ -53,8 +54,35 @@ export const SpinPage = () => {
 
   const [queueStatus, setQueueStatus] = useState<string | null>(null);
 
+  const [results, setResults] = useState<SpinLogRow[]>([]);
+  const [resultsLoading, setResultsLoading] = useState(false);
+  const [resultsError, setResultsError] = useState<string | null>(null);
+
   // Generate session ID once per page load
   const sessionId = useMemo(() => randomSeed(), []);
+
+  const getTodayIso = () => new Date().toISOString().split('T')[0];
+
+  const fetchSpinsForToday = () => {
+    if (!isApiConfigured()) return;
+    
+    setResultsLoading(true);
+    setResultsError(null);
+    
+    api.getSpins({
+      date: getTodayIso(),
+      period: selectedPeriod || undefined,
+    })
+    .then(data => {
+      setResults(data);
+      setResultsLoading(false);
+    })
+    .catch(err => {
+      console.error('Failed to fetch spins:', err);
+      setResultsError('Failed to load spins history.');
+      setResultsLoading(false);
+    });
+  };
 
   useEffect(() => {
     // Only load settings from API if configured
@@ -62,6 +90,8 @@ export const SpinPage = () => {
       console.warn('API not configured - using default settings');
       return;
     }
+
+    fetchSpinsForToday();
 
     // Load settings from API (using new api client)
     // Note: The API returns SettingRow[], but legacy Settings type is used in UI
@@ -210,6 +240,7 @@ export const SpinPage = () => {
           );
         }
         setLastLoggedRow(payload);
+        fetchSpinsForToday();
       }).catch(err => {
         console.error('Failed to log spin:', err);
       });
@@ -298,6 +329,29 @@ export const SpinPage = () => {
    * - It passes ['plantae_mercy', 'wildcard_iucn'] as rule flags.
    * - It does not set veto_used and does not call veto spin logic.
    */
+
+  const handleRerollFromHistory = (row: SpinLogRow) => {
+    // Prime the rings
+    setCurrentResult(prev => ({
+      ...prev,
+      region: row.result_region as Region,
+      taxon: row.result_taxon as Taxon,
+      iucn: row.result_iucn as IUCN,
+      timestamp: Date.now(),
+      plantaeMercyApplied: row.plantae_mercy,
+    }));
+
+    // Prime the student
+    setCurrentStudent(row.student_name
+      ? { email: row.email, name: row.student_name, period: row.period, hasSpun: false }
+      : null
+    );
+
+    // Reset UI state
+    setVetoTarget(null);
+    setShowRegionPicker(false);
+  };
+
   const applyPlantaeMercy = (chosenRegionKey: Region) => {
     const mercyResult: SpinResult = {
       ...currentResult,
@@ -550,6 +604,15 @@ export const SpinPage = () => {
               )}
             </div>
           )}
+        </div>
+
+        <div className="max-w-4xl mx-auto mt-6">
+          <ResultsPanel
+            rows={results}
+            loading={resultsLoading}
+            error={resultsError}
+            onReroll={handleRerollFromHistory}
+          />
         </div>
 
         {showRegionPicker && (
