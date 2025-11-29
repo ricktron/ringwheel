@@ -56,6 +56,43 @@ function doGet(e) {
 }
 
 /**
+ * Mirrors SpinLogRow TypeScript type.
+ * Filters by date (default today), period, and email.
+ */
+function getSpinsData(ss, filters) {
+  const sheet = ss.getSheetByName('SpinsLog');
+  if (!sheet) return [];
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return [];
+  const headers = values[0];
+  const h = (name) => headers.indexOf(name);
+
+  // Default to today if no date provided
+  const filterDate = filters.date || new Date().toISOString().split('T')[0];
+
+  return values.slice(1)
+    .filter(row => {
+      const rowDate = String(row[h('timestamp_iso')] || '').split('T')[0];
+      if (rowDate !== filterDate) return false;
+      if (filters.period && String(row[h('period')] || '') !== filters.period) return false;
+      if (filters.email && String(row[h('email')] || '') !== filters.email) return false;
+      return true;
+    })
+    .map(row => ({
+      timestamp_iso: String(row[h('timestamp_iso')] || ''),
+      student_name: String(row[h('student_name')] || ''),
+      email: String(row[h('email')] || ''),
+      period: String(row[h('period')] || ''),
+      result_region: String(row[h('result_A')] || ''),
+      result_taxon: String(row[h('result_B')] || ''),
+      result_iucn: String(row[h('result_C')] || ''),
+      plantae_mercy: row[h('plantae_mercy')] === true || String(row[h('plantae_mercy')]).toUpperCase() === 'TRUE',
+      veto_used: row[h('veto_used')] === true || String(row[h('veto_used')]).toUpperCase() === 'TRUE',
+      rule_flags: safeParseJSON(row[h('rule_flags_json')], []),
+    }));
+}
+
+/**
  * Handle POST requests
  */
 function doPost(e) {
@@ -65,10 +102,16 @@ function doPost(e) {
     return forbidden();
   }
   
-  const type = (body.type || '').toLowerCase();
+  const type = (body.mode || body.type || '').toLowerCase();
   const ss = SpreadsheetApp.openById(SHEET_ID);
   
   switch (type) {
+    case 'getspins':
+      return json(getSpinsData(ss, {
+        date: body.date,
+        period: body.period,
+        email: body.email,
+      }));
     case 'logspin':
       // A2: Ensure student info and period are mapped
       // Expected payload: { student_name, email, period, ... }
