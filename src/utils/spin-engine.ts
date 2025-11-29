@@ -308,7 +308,7 @@ export class SpinEngine {
   vetoSpinSingle(
     currentResult: SpinResult,
     target: 'region' | 'taxon' | 'iucn',
-    options: { } = {}
+    _options: { } = {}
   ): { result: SpinResult; ruleFlags: string[] } {
     const ruleFlags: string[] = [];
     

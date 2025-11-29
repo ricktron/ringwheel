@@ -16,29 +16,7 @@ function shuffleArray<T>(items: T[]): T[] {
   return arr;
 }
 
-const buildSpinLogPayload = (
-  result: SpinResult,
-  sessionId: string,
-  vetoUsed: boolean,
-  ruleFlags: string[]
-): SpinsLogPayload => {
-  return {
-    timestamp_iso: new Date().toISOString(),
-    session_id: sessionId,
-    // A2: Student info defaults to empty strings until student selector is implemented
-    period: '',
-    student_name: '',
-    email: '',
-    result_A: result.region,
-    result_B: result.taxon,
-    result_C: result.iucn,
-    plantae_mercy: result.plantaeMercyApplied ?? false,
-    veto_used: vetoUsed,
-    seed: randomSeed(),
-    is_test: false,
-    rule_flags_json: JSON.stringify(ruleFlags),
-  };
-};
+
 
 export const SpinPage = () => {
   const [spinning, setSpinning] = useState(false);
@@ -58,7 +36,7 @@ export const SpinPage = () => {
   });
   const [manualRegion, setManualRegion] = useState<Region | undefined>();
   const [showRegionPicker, setShowRegionPicker] = useState(false);
-  const [vetoUsed, setVetoUsed] = useState(false);
+
   const [vetoTarget, setVetoTarget] = useState<'region' | 'taxon' | 'iucn' | null>(null);
   const [vetoWarning, setVetoWarning] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
@@ -159,6 +137,34 @@ export const SpinPage = () => {
     // Note: We do not mark them as spun yet (Phase C2)
   };
 
+  const buildSpinLogPayload = (
+    result: SpinResult,
+    ruleFlags: string[],
+    options: { vetoUsed: boolean; target: 'region' | 'taxon' | 'iucn' | null; isTest: boolean }
+  ): SpinsLogPayload => {
+    const timestamp_iso = new Date(result.timestamp).toISOString();
+
+    const studentName = currentStudent ? currentStudent.name : '';
+    const studentEmail = currentStudent ? currentStudent.email : '';
+    const studentPeriod = currentStudent ? currentStudent.period : '';
+
+    return {
+      timestamp_iso,
+      session_id: sessionId,
+      period: studentPeriod,
+      student_name: studentName,
+      email: studentEmail,
+      result_A: result.region,
+      result_B: result.taxon,
+      result_C: result.iucn,
+      plantae_mercy: result.plantaeMercyApplied ?? false,
+      veto_used: options.vetoUsed,
+      seed: randomSeed(),
+      is_test: options.isTest,
+      rule_flags_json: JSON.stringify(ruleFlags),
+    };
+  };
+
   const applySpin = (
     result: SpinResult,
     ruleFlags: string[],
@@ -185,10 +191,24 @@ export const SpinPage = () => {
       finalRuleFlags.push('veto_respin');
     }
 
-    const payload = buildSpinLogPayload(result, sessionId, isVeto, finalRuleFlags);
+    const payload = buildSpinLogPayload(result, finalRuleFlags, {
+      vetoUsed: isVeto,
+      target: target,
+      isTest: false
+    });
 
     if (isApiConfigured()) {
       api.logSpin(payload).then(() => {
+        // Mark currentStudent as having spun, if present
+        if (currentStudent) {
+          setSpinQueue(prev =>
+            prev.map(item =>
+              item.email === currentStudent.email && item.period === currentStudent.period
+                ? { ...item, hasSpun: true }
+                : item
+            )
+          );
+        }
         setLastLoggedRow(payload);
       }).catch(err => {
         console.error('Failed to log spin:', err);
@@ -197,11 +217,7 @@ export const SpinPage = () => {
       console.warn('API not configured - spin not logged');
     }
 
-    if (isVeto) {
-      setVetoUsed(true);
-    } else {
-      setVetoUsed(false);
-    }
+
   };
 
   const executeSpin = (isVetoRespin: boolean, target: 'region' | 'taxon' | 'iucn' | null) => {
