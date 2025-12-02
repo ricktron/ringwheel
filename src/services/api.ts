@@ -2,38 +2,76 @@ import type { APIResponse, RosterEntry, RingWeights, Settings, SpinResult, RingS
 
 // Support both old and new env variable names for backward compatibility
 const API_URL = import.meta.env.VITE_SPIN_API_URL || import.meta.env.VITE_WEB_APP_URL || '';
-const API_TOKEN = import.meta.env.VITE_SPIN_API_TOKEN || import.meta.env.VITE_API_TOKEN || '';
+// Primary: VITE_RINGWHEEL_API_TOKEN, fallback to legacy names
+const API_TOKEN = import.meta.env.VITE_RINGWHEEL_API_TOKEN || import.meta.env.VITE_SPIN_API_TOKEN || import.meta.env.VITE_API_TOKEN || '';
+
+/**
+ * Returns the base API URL (deployed Apps Script Web App URL)
+ */
+function getApiBase(): string {
+  return API_URL;
+}
+
+/**
+ * Build URL with common query parameters including token
+ * Used for GET requests to avoid CORS preflight
+ */
+function buildUrl(params: Record<string, string>): string {
+  const base = getApiBase();
+  const search = new URLSearchParams({
+    token: API_TOKEN,
+    ...params,
+  });
+  return `${base}?${search.toString()}`;
+}
+
+/**
+ * Handle response errors and non-JSON responses
+ * Provides robust error handling for backend responses
+ */
+async function handleResponse<T>(response: Response): Promise<T> {
+  const ct = response.headers.get('content-type') || '';
+
+  if (!response.ok) {
+    // Try to surface backend error text (e.g., "Forbidden")
+    const text = await response.text().catch(() => '');
+    throw new Error(text ? `Backend error ${response.status}: ${text}` : `Backend error ${response.status}`);
+  }
+
+  if (!ct.includes('application/json')) {
+    const text = await response.text().catch(() => '');
+    throw new Error(text ? `Backend returned non-JSON response: ${text}` : 'Backend returned non-JSON response');
+  }
+
+  return response.json() as Promise<T>;
+}
 
 /**
  * Generic GET request using lowercase `type` parameter
+ * Uses buildUrl to include token in query string
+ * No Content-Type header to avoid CORS preflight
  */
 async function get<T>(type: string): Promise<T> {
-  const url = new URL(API_URL);
-  url.searchParams.append('type', type);
-  url.searchParams.append('token', API_TOKEN);
-  
-  const response = await fetch(url.toString());
-  if (!response.ok) {
-    throw new Error(`API GET failed: ${response.status}`);
-  }
-  return response.json();
+  const response = await fetch(buildUrl({ type }), {
+    method: 'GET',
+    // No headers to keep request "simple" and avoid CORS preflight
+  });
+  return handleResponse<T>(response);
 }
 
 /**
  * Generic POST request with lowercase `type` in JSON body
+ * Token is included in the JSON body for authentication
  */
 async function post<T>(body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(API_URL, {
+  const response = await fetch(getApiBase(), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ ...body, token: API_TOKEN }),
   });
-  if (!response.ok) {
-    throw new Error(`API POST failed: ${response.status}`);
-  }
-  return response.json();
+  return handleResponse<T>(response);
 }
 
 /**
@@ -60,24 +98,44 @@ export class APIService {
     data?: unknown
   ): Promise<APIResponse<T>> {
     try {
-      const url = new URL(API_URL);
-      url.searchParams.append('type', endpoint);
-      url.searchParams.append('token', API_TOKEN);
-
-      const options: RequestInit = {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      };
-
-      if (method === 'POST' && data) {
-        options.body = JSON.stringify({ ...(data as object), token: API_TOKEN });
+      let response: Response;
+      
+      if (method === 'GET') {
+        // GET: Use buildUrl with token in query string, no Content-Type header
+        response = await fetch(buildUrl({ type: endpoint }), {
+          method: 'GET',
+          // No headers to keep request "simple" and avoid CORS preflight
+        });
+      } else {
+        // POST: Token goes in JSON body with Content-Type header
+        response = await fetch(getApiBase(), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ...(data as object), token: API_TOKEN }),
+        });
       }
 
-      const response = await fetch(url.toString(), options);
-      const result = await response.json();
+      const ct = response.headers.get('content-type') || '';
 
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        return {
+          success: false,
+          error: text ? `Backend error ${response.status}: ${text}` : `Backend error ${response.status}`,
+        };
+      }
+
+      if (!ct.includes('application/json')) {
+        const text = await response.text().catch(() => '');
+        return {
+          success: false,
+          error: text ? `Backend returned non-JSON response: ${text}` : 'Backend returned non-JSON response',
+        };
+      }
+
+      const result = await response.json();
       return result;
     } catch (error) {
       console.error(`API request failed for ${endpoint}:`, error);
