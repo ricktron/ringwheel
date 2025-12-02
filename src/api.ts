@@ -63,7 +63,11 @@ async function handleResponse<T>(res: Response): Promise<T> {
  * No Content-Type header to avoid CORS preflight
  */
 async function get<T>(type: string): Promise<T> {
-  const res = await fetch(buildUrl({ type }), {
+  const url = buildUrl({ type });
+  // TEMP: verify token is in URL (mask token value for security)
+  const maskedUrl = url.replace(/token=[^&]+/, 'token=***');
+  console.log('[Ringwheel] Fetching', maskedUrl);
+  const res = await fetch(url, {
     method: 'GET',
     // No headers to keep request "simple" and avoid CORS preflight
   });
