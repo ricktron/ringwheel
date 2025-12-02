@@ -94,7 +94,7 @@ export const ApiNotConfiguredBanner = () => {
           </h3>
           <p className="mt-1 text-sm text-yellow-700">
             Check <code className="bg-yellow-100 px-1 rounded">VITE_SPIN_API_URL</code> and{' '}
-            <code className="bg-yellow-100 px-1 rounded">VITE_SPIN_API_TOKEN</code> in your{' '}
+            <code className="bg-yellow-100 px-1 rounded">VITE_RINGWHEEL_API_TOKEN</code> in your{' '}
             <code className="bg-yellow-100 px-1 rounded">.env</code> file.
           </p>
           <p className="mt-1 text-sm text-yellow-700">

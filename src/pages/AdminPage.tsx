@@ -389,7 +389,7 @@ export const AdminPage = () => {
               : '✗ API not configured (check .env file)'}
           </p>
           <p className="mt-2 text-sm text-gray-600">
-            Configure VITE_SPIN_API_URL and VITE_SPIN_API_TOKEN in your .env file
+            Configure VITE_SPIN_API_URL and VITE_RINGWHEEL_API_TOKEN in your .env file
           </p>
         </div>
       </div>
