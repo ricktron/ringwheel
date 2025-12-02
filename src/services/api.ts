@@ -62,12 +62,13 @@ async function get<T>(type: string): Promise<T> {
 /**
  * Generic POST request with lowercase `type` in JSON body
  * Token is included in the JSON body for authentication
+ * Uses text/plain to avoid CORS preflight with Apps Script
  */
 async function post<T>(body: Record<string, unknown>): Promise<T> {
   const response = await fetch(getApiBase(), {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'text/plain;charset=utf-8',
     },
     body: JSON.stringify({ ...body, token: API_TOKEN }),
   });
@@ -107,11 +108,11 @@ export class APIService {
           // No headers to keep request "simple" and avoid CORS preflight
         });
       } else {
-        // POST: Token goes in JSON body with Content-Type header
+        // POST: Token goes in JSON body, use text/plain to avoid CORS preflight
         response = await fetch(getApiBase(), {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
+            'Content-Type': 'text/plain;charset=utf-8',
           },
           body: JSON.stringify({ ...(data as object), token: API_TOKEN }),
         });
