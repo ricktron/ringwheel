@@ -2,6 +2,10 @@
 
 Date: 2026-11-24
 
+> This is a dated record of the consolidation (PR 8). Later changes are described elsewhere:
+> Local Mode, Connected Mode and the end of build-time configuration in
+> [`LOCAL_MODE.md`](LOCAL_MODE.md), hosting in [`VERCEL.md`](VERCEL.md).
+
 This records how the two Ringwheel applications were merged into one, what was kept from each,
 what changed in behavior, what is still open, and how to retire the second repository.
 

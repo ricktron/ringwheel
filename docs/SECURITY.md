@@ -7,26 +7,30 @@ Date: 2026-11-24
 No credential belongs in this repository or in a compiled copy of the site.
 
 - This repository is public. Anything committed is public forever, including in history.
-- Every `VITE_` value is compiled into the JavaScript the browser downloads. A token placed
-  there is readable by anyone who can open that copy of the site.
-- The API token is the only thing protecting the roster (student names and email
+- RingWheel reads no build-time environment variables. A backend address or token is never
+  compiled into the site, whatever is set when it is built.
+- The API token is the only thing protecting a connected roster (student names and email
   addresses), the spin log, and the routes that change settings.
+- Local Mode, the default, has no token and contacts no backend. See `docs/LOCAL_MODE.md`.
 
 What enforces the rule:
 
-- `tests/repo/hygiene.test.ts` fails the build if `.env.example` holds anything but
-  placeholders, if another `.env` file is tracked, if a real Apps Script address appears in a
-  tracked file, or if the frontend source gains a hard-coded address or token.
-- `npm run build` prints a warning when a token is about to be compiled into the site.
-- The app refuses to send the placeholder values from `.env.example`.
-- The Admin page shows where the token in use came from.
+- `tests/repo/hygiene.test.ts` fails the build if any `.env` file is tracked, if a real Apps
+  Script address appears in a tracked file, if the frontend reads a `VITE_` variable or gains a
+  hard-coded address or token, or if Local Mode code could make a network request.
+- `npm run test:e2e` builds the site with canary values in the old variables and fails if
+  either appears anywhere in the output.
+- `npm run build` prints a notice when one of the old variables is set, saying it is ignored.
+- On the hosted site a Content Security Policy allows connections only to Google Apps Script.
+- Connected Mode turns on only when the teacher enters a complete connection on the Admin page.
 
 Where the token should live instead:
 
 - Backend: `API_TOKEN` in the Apps Script project's Script Properties. Never in `Code.gs`.
-- Local development: `.env.local`, which Git ignores.
-- A hosted copy of the site: build with no token, then enter it on the Admin page under
-  Connection. It is kept in that browser only.
+- Frontend, local or hosted: entered on the Admin page under "Where data is kept". It is kept
+  in that browser's storage only. There is no `.env` file any more.
+- A token in browser storage can be read by anyone with access to that browser profile. Use
+  Connected Mode on your own computer, not a shared one.
 
 ## Finding: a token was published in `.env.example`
 
@@ -78,8 +82,8 @@ openssl rand -hex 32
 
 3. **Replace it.** In Script Properties, set `API_TOKEN` to the new value and save. It takes
    effect immediately. No new deployment is needed and the Web App address does not change.
-4. **Update your own copy of the app.** Either put the new value in `.env.local` and restart
-   `npm run dev`, or enter it on the Admin page under Connection.
+4. **Update your own copy of the app.** Enter the new value on the Admin page under "Where data
+   is kept" and save.
 5. **Confirm the new token works** (replace `URL` and `NEW`):
 
 ```bash
