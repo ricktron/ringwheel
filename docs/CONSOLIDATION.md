@@ -72,6 +72,9 @@ Everything removed remains available in Git history at commit `d472b88`.
 
 One module decides every spin: `src/utils/spin-engine.ts`. It is covered by `src/utils/spin-engine.test.ts`.
 
+With the Settings sheet at its defaults, the outcomes a class can get are the same as on
+`main`. Anything that would change who or what can be picked is behind a switch that is off.
+
 1. Each ring is a weighted pick over its eligible options. An option is eligible when it is
    active and its weight is above zero.
 2. By default every canonical label has weight 1. The Rings sheet changes the odds only when
@@ -79,76 +82,118 @@ One module decides every spin: `src/utils/spin-engine.ts`. It is covered by `src
    sizes show the odds.
 3. Plantae is never produced by a random pick, whatever the sheet says.
 4. Pair cap: a Region and Taxon pair is not allowed while its share of this session's normal
-   spins is at or above the cap (default 12%). If the first draw lands on a capped pair, the
-   pair is redrawn from the allowed pairs and the row is flagged `pair_cap_reroll`.
+   spins is at or above the cap. The cap is the fixed 12% it has always been. The value in the
+   Settings sheet is used only when `usePairCapSetting` is `true`. If the first draw lands on a
+   capped pair, the pair is redrawn from the allowed pairs and the row is flagged `pair_cap_reroll`.
 5. Veto re-spins exactly one ring. The other two do not change and the target always changes.
 6. Plantae Mercy sets the taxon to Plantae with the region the teacher picks, keeps the IUCN
-   status, and is flagged `plantae_mercy` and `wildcard_iucn`. It is not a veto.
+   status, and is flagged `plantae_mercy` and `wildcard_iucn`. It is not a veto. With no
+   result on screen yet the status recorded is LC, as on `main`.
 7. If no legal outcome exists, no spin is made and the page says why. There is no fallback result.
-8. Every outcome comes from a seed. The seed written to `SpinsLog` reproduces the logged
-   result when replayed with the same ring configuration and pair history.
+8. Every random outcome comes from a seed. The seed written to `SpinsLog` reproduces the logged
+   result when replayed with the same ring configuration and pair history. A mercy row has no
+   seed because nothing in it is random.
+
+### How this lines up with the Master Guide
+
+| Master Guide | Implementation | Status |
+| --- | --- | --- |
+| 7.1 seeded generator, unbiased over the eligible set | Seeded generator, tested for uniformity | Aligned. `main` logged a seed unrelated to the result. |
+| 7.2 only students on the roster for the chosen class | Queue built from the roster for one semester and period | Aligned |
+| 2.3 any rule that biases selection must be documented and visible | Weights and the sheet pair cap are off unless switched on, and the page says when they apply | Aligned |
+| 7.4 no weighting or no-repeat logic is promised in v1 | A 12% pair cap exists and always has | **Not in the guide.** Kept because it is existing behavior. Needs a decision: document it or remove it (D2). |
+| 6.2 do not pretend spins are logged | Save status is shown in words: saved, incomplete, or NOT SAVED | Aligned |
+| 6.2 do not spin on partial or broken data | Spins with built-in defaults and a red banner when settings cannot be loaded, as on `main` | **Differs from the guide.** Needs a decision (D5). |
+| 5.1 inactive students are never selected | The roster has no status column | **Gap.** Needs a decision (D8). |
+| 2.5 logs are append-only | The backend only ever appends to `SpinsLog` | Aligned |
 
 ### Behavior that changed compared with `main`
 
+Changes that cannot alter which result a student gets:
+
 | Area | Before | Now |
 | --- | --- | --- |
-| Seed in `SpinsLog` | A fresh random value unrelated to the result | The seed that produced the result |
-| Pair cap value | Always 12, whatever the Settings sheet said | Read from `midterm_pair_cap_pct` (or the legacy `pairCapPercent`) |
-| Ring weights | Saved by the admin page but never used by spins | Still unused by default. Used only when `applyRingWeights` is on. |
-| Dead end in the rules | Silently returned Palearctic, Mammalia, LC | Shows an error, logs nothing |
-| Auto test spins | Counted toward the real pair cap; wrote to the sheet by default | Separate history; sheet writes are opt-in |
-| Veto after a mercy | Row had Plantae with `plantae_mercy` false | Mercy marking is kept unless the taxon ring is re-spun |
+| Seed in `SpinsLog` | A fresh random value unrelated to the result | The seed that produced the result. Empty for mercy rows. |
+| Dead end in the rules | Silently returned Palearctic, Mammalia, LC | Shows an error, logs nothing. Not reachable with default settings. |
 | Failed log write | Console message only | "NOT SAVED" on screen, a count of unsaved spins, and a retry |
-| Queue after a failed log | Student stayed "not spun" | Student is marked as spun; the save status is tracked separately |
-| Admin save | Replaced the whole sheet with five rows, dropping other keys and all notes | Merges into the loaded rows. Unknown rows, notes, colors, order and active flags are kept. Save is disabled if loading failed. |
+| Log row missing fields | Reported as saved | "Saved INCOMPLETE" naming the fields, or refused if a required column is absent |
+| Veto after a mercy | Row had Plantae with `plantae_mercy` false | Mercy marking is kept unless the taxon ring is re-spun |
+| Admin save | Replaced the whole sheet with five rows, dropping other keys and all notes | Merges into the current rows and is refused if the Sheet changed after the page loaded |
 | Before the first spin | Showed Palearctic, Mammalia, LC as if it were a result | Shows "No spin yet" |
 | Spin length | 2 seconds | 3 seconds (0.4 with reduced motion) |
-| Setting values stored as real TRUE/FALSE cells | Read as false | Read correctly |
-| Duplicate roster rows | Student appeared twice in the queue | Appears once |
+
+Changes that can alter classroom behavior. Each is either switched off or listed for approval in section 5:
+
+| Area | Before | Now | Where decided |
+| --- | --- | --- | --- |
+| Pair cap value | Always 12 | Still always 12. Sheet value used only if `usePairCapSetting` is on. | D1, off |
+| Ring weights | Never used | Still never used unless `applyRingWeights` is on | D3, off |
+| Plantae Mercy before any spin | Recorded LC | Same | D6, unchanged |
+| Queue after a failed log write | Student stayed "not spun", so Next Spinner chose the same student again | Student is marked as spun; the save is tracked and retried separately | D12, changed |
+| Duplicate roster rows | Student appeared twice in the queue | Appears once, and the page says a duplicate was ignored | D13, changed |
+| Settings stored as real TRUE/FALSE cells | Ignored: audio and Plantae Mercy stayed on even with a FALSE cell, and confetti stayed off even with a TRUE cell | Read as written | D14, changed |
+| Auto test spins | Counted toward the real pair cap for the rest of the session | Kept in a separate history | D15, changed |
 
 ## 5. Decisions that need the teacher
 
-The Master Guide deliberately leaves several rules open. These were kept as they were, or
-resolved in the most conservative way, and need a yes or no.
+Nothing below was decided for you. "Same as before?" compares with `main`. Where it says
+"no change until approved", the code still does what `main` does.
 
-| ID | Question | Current behavior |
-| --- | --- | --- |
-| D1 | Should the pair cap in the Settings sheet be honored? | Yes. If the sheet has a value other than 12, spins will now follow it. |
-| D2 | What is the pair cap measured over? | One page load, across all periods. Veto and mercy results are not counted and are not blocked by it. Reloading the page resets it. |
-| D3 | Should ring weights ever apply? | Off unless `applyRingWeights` is set to true. A weight of 0 or `active` false removes an option. |
-| D4 | Queue or random student? | Queue: every student spins once, in alphabetical or shuffled order. The prototype's "random student each spin" was not adopted. |
-| D5 | Spin when settings cannot be loaded? | Yes, with built-in defaults and a red banner. Master Guide 6.2 says not to spin on partial data; `main` already spun in this case. |
-| D6 | Plantae Mercy details | Allowed at any time. If there is no result yet, the IUCN status is drawn at random. |
-| D7 | Second spin for a student who already spun | Allowed, with a hint. Not blocked. |
-| D8 | Inactive students | The roster has no status column, so there is no way to mark a student inactive short of removing the row. |
-| D9 | `mode` (midterm or final) and "random events" | Not implemented. The only code for them was unused and was removed. |
-| D10 | SPIN while a veto ring is selected | Performs the veto, as on `main`. The button label now says so. |
-| D11 | What counts as "today" in the log view | The UTC date, as on `main`. In the evening Central time (6 pm or 7 pm, depending on daylight saving) the view rolls to the next day. |
+Three items are marked **SPECIAL REVIEW** because the current behavior is hard to defend or
+conflicts with the Master Guide.
+
+| ID | Question | What the app does now | Same as before? | Recommended decision | If you approve the recommendation |
+| --- | --- | --- | --- | --- | --- |
+| D1 | Should the pair cap in the Settings sheet be honored? | No. The cap is a fixed 12%. The sheet value is ignored unless `usePairCapSetting` is on. | Yes | Leave off until D2 is settled. Then turn it on if you want to tune the cap. | Turning it on makes the Admin value real. A cap above 12 allows more repeats; below 12 allows fewer. |
+| **D2 SPECIAL REVIEW** | What is the pair cap measured over, and should it exist? | Counted over one page load, across every period spun in that window. Reloading the page resets it. Veto and mercy results are not counted and are not limited. | Yes | Decide whether you want the rule at all, since the Master Guide does not include it. If yes: measure it per class period and rebuild the count from that period's logged spins, so a reload does not reset it. | Fewer repeated Region and Taxon pairs within one class, and consistent behavior after a reload. This changes which results can come up, so it needs your approval, a code change, and a Master Guide entry. Not implemented. |
+| D3 | Should ring weights ever apply? | No, unless `applyRingWeights` is on. | Yes | Leave off unless you deliberately want unequal odds. | When on, a weight of 0 or `active` false removes an option, and the wheel shows the odds by slice size. |
+| D4 | Queue or random student? | Queue. Every student spins once, in alphabetical or shuffled order. | Yes | Keep the queue. | No change. The prototype's "random student every spin" could pick one student twice and another never. |
+| **D5 SPECIAL REVIEW** | Spin when settings cannot be loaded? | Yes, with built-in defaults (equal odds, 12% cap) and a red banner. | Yes | Block spinning until settings load, with a clearly labeled "Spin with defaults" override. | Brings the app in line with Master Guide 6.2. Matters most once D1 or D3 is on, because a failed load would otherwise quietly spin with different odds than you configured. Changes behavior during a backend outage. Not implemented. |
+| D6 | Plantae Mercy before any spin | Allowed. Records LC as the IUCN status, flagged `wildcard_iucn`. | Yes | Require a spin first. | Removes a row whose IUCN value was never spun. Mercy would be unavailable until the student has a result. Not implemented. |
+| D7 | Second spin for a student who already spun | Allowed. The page shows a hint. | Yes | Keep allowed. | No change. Blocking it would take away your ability to redo a spin. |
+| D8 | Inactive students | No way to mark one. Removing the roster row is the only option. | Yes | Add an optional `active` column to the roster, blank meaning active. | Closes the gap with Master Guide 5.1. It is a sheet schema change, so it needs your approval and a backend deploy. Not implemented. |
+| D9 | `mode` (midterm or final) and "random events" | Not implemented. | Yes (the only code for them was never used) | Leave out. Remove "random events" from the repository description. | No change in class. |
+| D10 | SPIN while a veto ring is selected | Performs the veto. The button label says so. | Yes | Keep. | No change. |
+| **D11 SPECIAL REVIEW** | What counts as "today" in the log view? | The UTC date. In the evening Central time (6 pm or 7 pm, depending on daylight saving) the view rolls over to the next day. | Yes | Use the school's time zone (America/Chicago, already set in the Apps Script project). | Evening use shows the right day. Daytime classes see no difference. It affects only which rows the log view lists and which can be re-rolled from it, not any result. Needs a backend change and deploy. Not implemented. |
+| D12 | After a failed save, is the student's turn over? | Yes. The student is marked as spun and the save is retried separately. | **No** | Approve. | Aligns with Master Guide 6.1 and 6.2. Before, Next Spinner picked the same student again, which meant a second spin for them or a stuck queue. To reject: say so and the previous behavior can be restored. |
+| D13 | A student listed twice in the roster for one period | One turn. The page says a duplicate row was ignored. | **No** | Approve. | Before, that student got two turns. |
+| D14 | Settings typed as real TRUE or FALSE in the Sheet | Read as written. | **No** | Approve, and check the three cells once. | Before, such cells were ignored. If `enablePlantaeMercy` or `enableAudio` is a real FALSE cell today, the Mercy button or the sound will turn off, which is what the cell says. If `enableConfetti` is a real TRUE cell, confetti turns on. Cells typed as text behave as before. |
+| D15 | Should auto test spins count toward the real pair cap? | No. | **No** | Approve. | Before, running the test harness changed which pairs real students could get for the rest of that session. |
+
+What is switched off pending your approval: D1 (`usePairCapSetting`) and D3 (`applyRingWeights`).
+What is not built pending your approval: D2, D5, D6, D8, D11.
+What changed and needs your yes or no: D12 to D15.
 
 ## 6. Security
 
+The credential finding, the rule, and the rotation procedure are in [`SECURITY.md`](SECURITY.md).
+
 Findings, most important first.
 
-1. **The API token is not a secret once it is in a build.** Any `VITE_` value is readable by
+1. **A token was published in `.env.example`.** Verified from history without printing the
+   value: on `main` since 2025-11-28, not a placeholder, short and guessable, next to a full
+   Web App deployment address. Replaced with placeholders on this branch but permanent in
+   history. Rotate `API_TOKEN`. Procedure in `SECURITY.md`.
+2. **The API token is not a secret once it is in a build.** Any `VITE_` value is readable by
    anyone who can load the site. The same token unlocks the roster (names and emails) and the
-   write routes. Until the backend has real sign-in, do not host a build with the token baked
-   in anywhere other people can reach. The Admin page can now store the URL and token in the
-   teacher's browser instead, so a hosted build can ship with no token.
-2. **`.env.example` on `main` contains a full Web App deployment URL and a token-like value.** This
-   repository is public. Both are replaced with placeholders here, but they remain in Git
-   history. If that value was ever the real `API_TOKEN`, treat it as exposed and rotate it.
+   write routes. Do not host a build with the token baked in anywhere other people can reach.
+   The Admin page can store the URL and token in the teacher's browser instead, the build
+   warns when a token is being compiled in, and a test fails if one is committed.
 3. **The email route was an open relay** for anyone holding the token. In `gas/Code.gs` it
    now only sends to the script owner or an explicit allowlist. Takes effect when deployed.
-4. **Admin writes could erase a sheet.** An empty or malformed request cleared the tab first.
-   The backend now validates before writing and never clears. Takes effect when deployed.
-   The frontend fix (merge instead of replace) takes effect with the frontend alone.
+4. **Admin writes could erase a sheet or overwrite someone else's edit.** The backend now
+   validates before writing, never clears, and refuses a save when the Sheet changed after it
+   was read. The frontend re-reads before saving, which protects even against the currently
+   deployed backend, apart from an edit made in the instant between that read and the write.
 5. **Spreadsheet formula injection.** Text from a request was written as is, so a value
    starting with `=` would run as a formula. Now stored as text. Takes effect when deployed.
-6. **The backend said `ok: true` when it had written nothing** (missing tab). Now `ok: false`.
+6. **The backend said `ok: true` when it had written nothing or only part of a record.** It
+   now answers complete, incomplete with the missing fields, or refused. Until it is deployed
+   the app shows saves as "Saved (not confirmed complete)" instead of "Saved to the log".
 7. **The token travels in the query string on reads.** That is how the existing contract
    avoids CORS preflight. It can appear in browser history. Left as is.
 8. **Secondary repository:** tracks a `.env` with Supabase publishable settings (unused) and
-   hard-codes the production Web App URL. It is private; nothing was copied from it.
+   hard-codes the production Web App address. It is private; nothing was copied from it.
 9. **Dependencies:** `npm audit fix` applied. Zero known issues in runtime dependencies;
    7 moderate remain in development tooling only.
 
@@ -163,12 +208,12 @@ from "can change configuration".
 | Step | Why it is gated |
 | --- | --- |
 | Review and merge the pull request | Merging was not authorized. |
+| Rotate `API_TOKEN` | Credential change. Procedure in `SECURITY.md`. Can be done before or after merging. |
+| Decide D1 to D15 | Fairness and classroom policy. |
 | Deploy `gas/Code.gs` to the Apps Script project | Production change. Steps and rollback are in `gas/README.md`. The consolidated frontend works with the currently committed backend too. |
 | Confirm the deployed script matches the repository | Could not be checked without production access. `RINGWHEEL_GAS_PATH=... npm test` runs the contract tests against a pasted copy. |
-| Rotate `API_TOKEN` | Credential change. See Security item 2. |
-| Compare `schema/Roster.csv` with the live sheet headers | The old sample did not match what the backend reads. It was aligned to the backend code, not to the live sheet, which was not inspected. |
+| Compare the live sheet headers with `schema/` | The live sheet was not inspected. After the backend is deployed, the health check does this for you and names any missing column. |
 | Health check and one test spin against production | No requests were sent to the live backend. |
-| Decide D1 to D11 | Fairness and classroom policy. |
 
 ## 8. Retiring `ringwheel-classroom-spinner`
 
@@ -202,10 +247,14 @@ The KB files were not rewritten, in line with the working agreements. These edit
 
 - `Ringwheel_Master_Guide_v1.md`
   - Section 3: add a v1.1 entry for the consolidation.
-  - Section 7: document the rules in section 4 above (weights behind a setting, Plantae
-    exclusion, pair cap, veto, mercy, no fallback, real seeds), once D1 to D11 are decided.
-  - Section 5.4: add `pair_cap_reroll` to the known rule flags.
+  - Section 7.4: the pair cap exists in the app and is not in the guide. Document it or
+    remove it, per D2.
+  - Section 7: once D1 to D15 are decided, document the rules in section 4 above.
+  - Section 5.4: list the rule flags in use (`pair_cap_reroll`, `veto_respin`,
+    `veto_respin_region`, `veto_respin_taxon`, `veto_respin_iucn`, `plantae_mercy`,
+    `wildcard_iucn`, `auto_test_run`) and say which `SpinsLog` columns are required.
   - Section 6.2: reconcile with D5.
+  - Section 5.1: reconcile with D8.
 - `KB/AGENTS.md`: layout and commands were updated in this change to match the repository.
 - File name drift: the KB refers to `Ringwheel_KB_01_AI_Development_Working_Agreements.md`
   in a `kb/` folder. The file in the repository is `KB/Ringwheel_KB_01_AI_Development.md`.

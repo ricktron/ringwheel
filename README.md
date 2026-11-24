@@ -55,7 +55,7 @@ npm run mock:backend
 | --- | --- |
 | `npm run lint` | ESLint |
 | `npm run build` | TypeScript and the production build |
-| `npm test` | Spin fairness rules, API client, backend contract, sheet merge logic |
+| `npm test` | Spin fairness rules, API client, backend contract, sheet schema mismatch, concurrent edits, no credentials in the repository |
 | `npm run test:e2e` | The classroom workflows in a real browser, against the real backend code on fake sheets |
 | `npm run check` | Lint, build and unit tests together |
 
@@ -78,8 +78,8 @@ Frontend: build and host the `dist/` folder on any static host.
 npm run build
 ```
 
-Read the Security section of [docs/CONSOLIDATION.md](docs/CONSOLIDATION.md) before hosting it
-anywhere other people can reach. To roll back, redeploy the previous build.
+Read [docs/SECURITY.md](docs/SECURITY.md) before hosting it anywhere other people can reach.
+Never build a hosted copy with the API token in a `VITE_` variable. To roll back, redeploy the previous build.
 
 Backend: see [gas/README.md](gas/README.md) for deploy, verify and roll back steps.
 
