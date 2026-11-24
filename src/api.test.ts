@@ -323,64 +323,54 @@ describe('response normalization (Sheets returns booleans, numbers or text depen
   });
 });
 
-describe('configuration problems are explicit', () => {
+describe('connection settings come only from what the teacher saved in this browser', () => {
   const storage = (values: Record<string, string>) => ({ getItem: (key: string) => values[key] ?? null });
+  const saved = (url: string, token: string) => storage({ 'ringwheel.apiUrl': url, 'ringwheel.apiToken': token });
 
-  it('is usable with a URL and a token', () => {
-    expect(resolveApiConfig({ VITE_SPIN_API_URL: URL_, VITE_RINGWHEEL_API_TOKEN: TOKEN })).toEqual({
-      url: URL_,
-      token: TOKEN,
-      tokenSource: 'build',
-      problems: [],
-    });
+  it('is usable with a saved URL and token', () => {
+    expect(resolveApiConfig(saved(URL_, TOKEN))).toEqual({ url: URL_, token: TOKEN, tokenSource: 'browser', problems: [] });
   });
 
   it('says what is missing', () => {
-    expect(resolveApiConfig({}).problems).toEqual(['The backend URL is not set.', 'The API token is not set.']);
-    expect(resolveApiConfig({ VITE_SPIN_API_URL: URL_ }).problems).toEqual(['The API token is not set.']);
+    expect(resolveApiConfig().problems).toEqual(['The backend URL is not set.', 'The API token is not set.']);
+    expect(resolveApiConfig(storage({})).problems).toEqual(['The backend URL is not set.', 'The API token is not set.']);
+    expect(resolveApiConfig(saved(URL_, '')).problems).toEqual(['The API token is not set.']);
+    expect(resolveApiConfig(saved(URL_, '')).tokenSource).toBe('none');
   });
 
-  it('treats the example-file placeholders as not configured instead of sending them', () => {
-    const fromExample = resolveApiConfig({
-      VITE_SPIN_API_URL: 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec',
-      VITE_RINGWHEEL_API_TOKEN: 'your-api-token-here',
-    });
-    expect(fromExample.problems).toEqual([
-      'The backend URL is still the placeholder from the example file.',
-      'The API token is still the placeholder from the example file.',
+  it('refuses placeholders and addresses that are not web addresses', () => {
+    expect(resolveApiConfig(saved('https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec', 'your-api-token-here')).problems).toEqual([
+      'The backend URL is a placeholder, not a real address.',
+      'The API token is a placeholder, not a real token.',
     ]);
-    expect(resolveApiConfig({ VITE_SPIN_API_URL: 'script.google.com/x', VITE_RINGWHEEL_API_TOKEN: TOKEN }).problems).toEqual([
-      'The backend URL must start with https://.',
-    ]);
+    expect(resolveApiConfig(saved('script.google.com/x', TOKEN)).problems).toEqual(['The backend URL must start with https://.']);
   });
 
-  it('still honours the legacy token variable', () => {
-    expect(resolveApiConfig({ VITE_SPIN_API_URL: URL_, VITE_SPIN_API_TOKEN: 'legacy' }).token).toBe('legacy');
-    expect(resolveApiConfig({ VITE_SPIN_API_URL: URL_, VITE_SPIN_API_TOKEN: 'legacy', VITE_RINGWHEEL_API_TOKEN: 'primary' }).token).toBe('primary');
-  });
-
-  it('prefers values saved in the browser and reports where the token came from', () => {
-    const config = resolveApiConfig(
-      { VITE_SPIN_API_URL: URL_, VITE_RINGWHEEL_API_TOKEN: TOKEN },
-      storage({ 'ringwheel.apiUrl': 'https://other.example.test/exec', 'ringwheel.apiToken': 'browser-token' })
-    );
-    expect(config).toMatchObject({ url: 'https://other.example.test/exec', token: 'browser-token', tokenSource: 'browser', problems: [] });
-    expect(resolveApiConfig({ VITE_SPIN_API_URL: URL_ }, storage({ 'ringwheel.apiToken': 't' })).tokenSource).toBe('browser');
-  });
-
-  it('the app-wide client refuses to send anything when not configured', async () => {
+  it('ignores build-time environment variables completely', async () => {
+    // Even with every old variable set, nothing is picked up: a deployed site can never
+    // start out pointed at somebody's backend.
+    vi.stubEnv('VITE_SPIN_API_URL', URL_);
+    vi.stubEnv('VITE_RINGWHEEL_API_TOKEN', TOKEN);
+    vi.stubEnv('VITE_SPIN_API_TOKEN', TOKEN);
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    vi.stubEnv('VITE_SPIN_API_URL', '');
-    vi.stubEnv('VITE_RINGWHEEL_API_TOKEN', '');
-    vi.stubEnv('VITE_SPIN_API_TOKEN', '');
     try {
+      expect(resolveApiConfig().problems).toHaveLength(2);
+      expect(resolveApiConfig(storage({})).token).toBe('');
       const err = await errorFrom(api.logSpin(payload));
       expect(err.kind).toBe('not_configured');
-      expect(err.message).toMatch(/backend URL is not set/);
       expect((await errorFrom(api.roster())).kind).toBe('not_configured');
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it('survives a browser that blocks storage access', () => {
+    const blocked = {
+      getItem: () => {
+        throw new Error('SecurityError');
+      },
+    };
+    expect(resolveApiConfig(blocked).problems).toHaveLength(2);
   });
 });

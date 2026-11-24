@@ -4,6 +4,8 @@ import { LogStatusBadge, type LogStatus } from './ResultPanel';
 export interface SessionSpin {
   id: string;
   payload: SpinsLogPayload;
+  /** Local Mode: the roster id of the student this spin belongs to. */
+  studentId?: string | null;
   status: LogStatus;
   error?: string;
 }
