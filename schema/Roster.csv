@@ -1,2 +1,4 @@
-period,class,first,last,email,group,id
-1,Bio,Alex,Jones,alex@example.com,A,101
+email,first,last,class,S1 Period,S2 Period
+ada.sample@example.com,Ada,Sample,Environmental Science,A,B
+ben.placeholder@example.com,Ben,Placeholder,Environmental Science,A,B
+cy.demo@example.com,Cy,Demo,Environmental Science,B,

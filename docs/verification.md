@@ -1,73 +1,56 @@
-# Ringwheel Verification Checklist
+# Ringwheel verification checklist
 
-This document provides a manual QA checklist for verifying the implemented features.
+Automated checks cover the rules and workflows listed in the README. This checklist is what
+still needs a person and the real backend. Use a demo period, not a real class.
 
-## Health & Connectivity
+## Automated (run before any deploy)
 
-- [ ] `GET {WEB_APP_URL}?type=health&token=API_TOKEN` returns `{ "status": "ok" }`.
-- [ ] `GET {WEB_APP_URL}?type=rings&token=API_TOKEN` returns valid JSON array.
-- [ ] `GET {WEB_APP_URL}?type=roster&token=API_TOKEN` returns valid JSON array.
-- [ ] `GET {WEB_APP_URL}?type=settings&token=API_TOKEN` returns valid JSON array.
-- [ ] Frontend app can be built with `npm run build` with no TS errors.
-- [ ] Frontend app can be started with `npm run dev`.
+```bash
+npm run check
+```
 
-## Spin Basics
+```bash
+npm run test:e2e
+```
 
-- [ ] `/spin` page loads without errors.
-- [ ] A visible "SPIN" button starts and stops the animation.
-- [ ] Spinner wheels show Region, Taxon, and IUCN status.
-- [ ] Current Result section displays A/B/C labels after spin.
-- [ ] Recent spins list (if implemented) shows A/B/C labels and seeds.
+Both must finish with no failures.
 
-## Logging
+## Before class (about two minutes)
 
-- [ ] After a spin, a new row appears in `SpinsLog` sheet with the correct `timestamp_iso` and `seed`.
-- [ ] `rule_flags_json` contains a valid JSON array (e.g. `[]` or `["random_event_sparkles"]`).
-- [ ] `plantae_mercy` field matches expectations (true when Plantae Mercy applied).
-- [ ] `is_test` field is set correctly based on test mode.
-- [ ] `session_id` is consistent across multiple spins in the same session.
+- [ ] The app loads and the top right says "Backend: connected".
+- [ ] No yellow or red banner is showing.
+- [ ] Load Roster for a demo period lists the students you expect.
+- [ ] Next Spinner, then SPIN. The wheel stops with the result under the pointer and the
+      result panel says "Saved to the log". "Saved (not confirmed complete)" means the
+      deployed backend is the older version. "Saved INCOMPLETE" or "NOT SAVED" names the
+      column to add to the `SpinsLog` tab.
+- [ ] A new row is in the `SpinsLog` sheet with the right student, period and results.
+- [ ] The text is readable from the back of the room on the projector.
 
-## Admin Write-back
+## After a backend deploy
 
-- [ ] `/admin` page loads without errors.
-- [ ] `/admin` displays current Settings and Ring Weights.
-- [ ] Editing a setting value and clicking "Save Settings" updates the Google Sheet.
-- [ ] Editing a ring weight and clicking "Save Weights" updates the Google Sheet.
-- [ ] Reloading `/spin` shows updated values after write-back.
+- [ ] `health` returns `{"status":"ok"}` with the token and `Forbidden` without it
+      (commands in `gas/README.md`).
+- [ ] Roster, rings and settings load in the app.
+- [ ] One test spin is logged.
+- [ ] Admin: change one setting, save, reload, confirm it stuck and that other rows and
+      notes in the `Settings` sheet are unchanged. Change it back.
 
-## ASMR & Confetti
+## After a frontend deploy
 
-- [ ] Spinning triggers tick audio without crashing the app.
-- [ ] Spin completion triggers reveal audio.
-- [ ] Confetti appears at the end of a spin on supported browsers.
-- [ ] Audio and confetti can be enabled/disabled via Settings (if implemented).
+- [ ] The checks under "Before class" pass on the deployed site.
+- [ ] If the site is reachable by other people, the Admin page says the API token source is
+      "saved in this browser", not "built into the site".
 
-## Random Events & Plantae Mercy
+## If something is wrong
 
-- [ ] Over several spins, a random event flag appears at least once (you may temporarily force the probability to 100% for testing).
-- [ ] A spin that meets the simple Plantae Mercy condition sets `plantae_mercy = true`.
-- [ ] Plantae Mercy is logged with the `'plantae_mercy'` flag in `rule_flags_json`.
-- [ ] "🌿 Plantae Mercy" button appears when conditions are met.
-- [ ] Plantae Mercy button allows region selection for re-spin.
-
-## API Contract Verification
-
-- [ ] All GET requests use `type` query parameter (lowercase).
-- [ ] All POST requests include `type` in JSON body (lowercase).
-- [ ] All requests include `token` for authentication.
-- [ ] Unauthorized requests (missing or invalid token) return "Forbidden".
-- [ ] Unknown types return "Not Found".
-
-## Browser Compatibility
-
-- [ ] Works in Chrome (latest).
-- [ ] Works in Firefox (latest).
-- [ ] Works in Safari (latest).
-- [ ] Works in Edge (latest).
-
-## Edge Cases
-
-- [ ] Empty Rings sheet handled gracefully (displays message or defaults).
-- [ ] Empty Settings sheet handled gracefully (uses defaults).
-- [ ] API errors displayed to user without crashing.
-- [ ] Rapid spin clicks don't cause issues.
+- "NOT SAVED to the log": the result on screen still stands. Use Retry. If it keeps failing,
+  write the result down and carry on; nothing is lost on screen until the page is closed.
+- "Saved INCOMPLETE": the student and result were stored. The fields named were not,
+  because `SpinsLog` has no column for them. Add the column headers.
+- Admin says the Sheet "was changed by someone else": nothing was saved and nothing was
+  lost. Press "Reload current values" and make the change again.
+- "Backend: error": read the line under it. A rejected token means the token in the app does
+  not match `API_TOKEN` in the Apps Script project.
+- "No spin was made": the rules left nothing legal to pick. The message says which rule.
+- Prefer rolling back to the previous version over fixing things during class.

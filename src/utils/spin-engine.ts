@@ -1,398 +1,351 @@
-import type { Region, Taxon, IUCN, SpinResult, RingWeights, RingSlice, RingName, SpinResultNew } from '../types';
-import { CryptoRNG } from './crypto-rng';
+/**
+ * Ringwheel spin engine: the single source of truth for how a spin is decided.
+ *
+ * Everything here is a pure function of its inputs. Given the same seed, ring
+ * configuration and pair history, a spin always produces the same outcome, so
+ * the seed written to SpinsLog really does reproduce the logged result.
+ *
+ * Rules implemented here (keep docs/CONSOLIDATION.md in sync when they change):
+ * - Each ring is a weighted pick over its eligible options.
+ * - An option is eligible when it is active and has a weight above zero.
+ * - Plantae is never eligible for a random pick. It is only reachable through
+ *   Plantae Mercy, which is a deliberate teacher action.
+ * - Pair cap: a Region|Taxon pair whose share of this session's normal spins is
+ *   at or above the cap is not allowed. If the first draw lands on a capped
+ *   pair, the pair is redrawn from the allowed pairs and the spin is flagged.
+ * - Veto re-spins exactly one ring and always changes that ring's value.
+ * - If no legal outcome exists the engine throws. It never falls back to a
+ *   fixed answer.
+ */
+import type { Region, Taxon, IUCN } from '../types';
 
-// Default ring options
 export const REGIONS: Region[] = [
   'Palearctic', 'Nearctic', 'Neotropical', 'Afrotropical',
-  'Indomalayan', 'Australasian', 'Antarctic', 'Oceanic'
+  'Indomalayan', 'Australasian', 'Antarctic', 'Oceanic',
 ];
 
 export const TAXA: Taxon[] = [
   'Mammalia', 'Aves', 'Reptilia', 'Amphibia',
   'Actinopterygii', 'Chondrichthyes', 'Insecta', 'Arachnida',
-  // Plantae is excluded from random spins (see spin() and vetoSpinSingle())
-  // It is only reachable via the manual Plantae Mercy UI path.
-  'Plantae', 'Fungi'
+  'Plantae', 'Fungi',
 ];
 
 export const IUCN_STATUS: IUCN[] = ['LC', 'NT', 'VU', 'EN', 'CR', 'EW', 'EX'];
 
-// Default equal weights
-export const DEFAULT_WEIGHTS: RingWeights = {
-  regions: Object.fromEntries(REGIONS.map(r => [r, 1])) as Record<Region, number>,
-  taxa: Object.fromEntries(TAXA.map(t => [t, 1])) as Record<Taxon, number>,
-  iucn: Object.fromEntries(IUCN_STATUS.map(i => [i, 1])) as Record<IUCN, number>,
+/** The taxon that random spins never produce. */
+export const MERCY_TAXON: Taxon = 'Plantae';
+
+export const DEFAULT_PAIR_CAP_PCT = 12;
+
+export type RingKey = 'region' | 'taxon' | 'iucn';
+export const RING_KEYS: RingKey[] = ['region', 'taxon', 'iucn'];
+
+export interface RingOption<T extends string = string> {
+  label: T;
+  weight: number;
+  active: boolean;
+}
+
+export interface RingConfig {
+  region: RingOption<Region>[];
+  taxon: RingOption<Taxon>[];
+  iucn: RingOption<IUCN>[];
+}
+
+const equalOptions = <T extends string>(labels: T[]): RingOption<T>[] =>
+  labels.map((label) => ({ label, weight: 1, active: true }));
+
+/** Built-in configuration: every canonical label, equal weight. */
+export const DEFAULT_RING_CONFIG: RingConfig = {
+  region: equalOptions(REGIONS),
+  taxon: equalOptions(TAXA),
+  iucn: equalOptions(IUCN_STATUS),
 };
 
-// ============================================================================
-// M3: New seeded spin engine functions
-// ============================================================================
-
-/**
- * Generate a cryptographically secure random seed as a 16-character hex string
- */
-export function randomSeed(): string {
-  const array = new Uint8Array(8);
-  crypto.getRandomValues(array);
-  return Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
+export interface SpinTriple {
+  region: Region;
+  taxon: Taxon;
+  iucn: IUCN;
 }
 
-/**
- * FNV-1a style hash returning a float 0..1 based on seed + ring
- */
-export function hashSeed(seed: string, ring: RingName): number {
-  const combined = seed + ring;
-  let hash = 2166136261;
-  for (let i = 0; i < combined.length; i++) {
-    hash ^= combined.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  // Convert to unsigned and normalize to 0..1
-  return ((hash >>> 0) % 1000000) / 1000000;
-}
-
-/**
- * Seeded weighted pick from active slices
- */
-export function seededPick(
-  seed: string,
-  ring: RingName,
-  slices: RingSlice[]
-): { value: RingSlice; seed: string } {
-  const activeSlices = slices.filter(s => s.active);
-  if (activeSlices.length === 0) {
-    throw new Error(`No active slices for ring ${ring}`);
-  }
-
-  const totalWeight = activeSlices.reduce((sum, s) => sum + s.weight, 0);
-  const rand = hashSeed(seed, ring) * totalWeight;
-
-  let cumulative = 0;
-  for (const slice of activeSlices) {
-    cumulative += slice.weight;
-    if (rand <= cumulative) {
-      return { value: slice, seed };
-    }
-  }
-
-  return { value: activeSlices[activeSlices.length - 1], seed };
-}
-
-/**
- * Standard ease out quint: 1 - (1 - t)^5
- */
-export function easeOutQuint(t: number): number {
-  return 1 - Math.pow(1 - t, 5);
-}
-
-/**
- * Check if A, B, C have duplicate values in final mode
- * TODO: Implement actual duplicate detection logic
- */
-function duplicateFinal(a: string, b: string, c: string): boolean {
-  // TODO: Currently returns false - implement real duplicate detection
-  // Simple check: returns true if any two labels are exactly the same
-  return a === b || b === c || a === c;
-}
-
-/**
- * Check if A|B pair exceeds cap percentage
- * TODO: Implement actual pair cap tracking
- */
-function pairExceedsCap(a: string, b: string, pairCapPct: number): boolean {
-  // TODO: Currently returns false - implement real pair cap tracking
-  // This would need session history to track actual pair frequencies
-  // For now, placeholder that uses parameters to pass lint
-  return pairCapPct < 0 && a === b; // Always false unless invalid config
-}
-
-export interface SpinPlan {
+export interface SpinOutcome extends SpinTriple {
+  /** Seed that produced this outcome. */
   seed: string;
-  results: SpinResultNew;
-  ruleFlags: string[];
-  randomEvent?: string | null;
+  /** Rule flags describing how the outcome was reached. */
+  flags: string[];
+  plantaeMercy: boolean;
+  vetoUsed: boolean;
+}
+
+export type SpinErrorCode = 'no_eligible_options' | 'pair_cap_exhausted' | 'no_alternative';
+
+/** Raised when the rules leave no legal outcome. Never swallowed by the engine. */
+export class SpinError extends Error {
+  readonly code: SpinErrorCode;
+
+  constructor(code: SpinErrorCode, message: string) {
+    super(message);
+    this.name = 'SpinError';
+    this.code = code;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Randomness
+// ---------------------------------------------------------------------------
+
+export type Rng = () => number;
+
+/** Fresh 64-bit seed from the platform CSPRNG, as 16 hex characters. */
+export function randomSeed(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** xmur3 string hash, used to turn a seed string into PRNG state. */
+function hashSeed(seed: string): number {
+  let h = 1779033703 ^ seed.length;
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = Math.imul(h ^ (h >>> 13), 3266489909);
+  return (h ^ (h >>> 16)) >>> 0;
 }
 
 /**
- * Plan a spin with rules engine
- * @param rings - Ring slices for A, B, C
- * @param mode - 'midterm' or 'final' mode
- * @param pairCapPct - Pair cap percentage (default 12)
- * @param randomEventProbability - Probability of random event (default 0.02 = 2%)
+ * Deterministic generator (mulberry32) returning floats in [0, 1).
+ * The same seed always yields the same sequence.
  */
-export function planSpin(
-  rings: Record<RingName, RingSlice[]>,
-  mode: 'midterm' | 'final' = 'midterm',
-  pairCapPct: number = 12,
-  randomEventProbability: number = 0.02
-): SpinPlan {
-  let seed = randomSeed();
+export function createRng(seed: string): Rng {
+  let state = hashSeed(seed);
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+interface Weighted {
+  weight: number;
+}
+
+function weightedPick<T extends Weighted>(options: T[], rng: Rng): T {
+  const total = options.reduce((sum, o) => sum + o.weight, 0);
+  let remaining = rng() * total;
+  for (const option of options) {
+    remaining -= option.weight;
+    if (remaining < 0) return option;
+  }
+  // Only reachable through floating point rounding at the very top of the range.
+  return options[options.length - 1];
+}
+
+/** Fisher-Yates shuffle driven by the supplied generator. Does not mutate. */
+export function shuffle<T>(items: T[], rng: Rng): T[] {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Eligibility
+// ---------------------------------------------------------------------------
+
+/**
+ * Options a random pick may land on for a ring: active, weight above zero,
+ * and never the mercy taxon.
+ */
+export function eligibleOptions<K extends RingKey>(config: RingConfig, ring: K): RingConfig[K] {
+  const options = config[ring] as RingOption[];
+  return options.filter(
+    (o) => o.active && Number.isFinite(o.weight) && o.weight > 0 && !(ring === 'taxon' && o.label === MERCY_TAXON)
+  ) as RingConfig[K];
+}
+
+function requireEligible<K extends RingKey>(config: RingConfig, ring: K): RingConfig[K] {
+  const options = eligibleOptions(config, ring);
+  if (options.length === 0) {
+    throw new SpinError('no_eligible_options', `No active options with a positive weight on the ${ring} ring.`);
+  }
+  return options;
+}
+
+// ---------------------------------------------------------------------------
+// Pair cap
+// ---------------------------------------------------------------------------
+
+/** Region|Taxon counts for the normal spins of one session. */
+export interface PairHistory {
+  total: number;
+  counts: Record<string, number>;
+}
+
+export function emptyPairHistory(): PairHistory {
+  return { total: 0, counts: {} };
+}
+
+export function pairKey(region: string, taxon: string): string {
+  return `${region}:${taxon}`;
+}
+
+/** Returns a new history with one more spin recorded. Does not mutate. */
+export function recordPair(history: PairHistory, region: string, taxon: string): PairHistory {
+  const key = pairKey(region, taxon);
+  return {
+    total: history.total + 1,
+    counts: { ...history.counts, [key]: (history.counts[key] ?? 0) + 1 },
+  };
+}
+
+/**
+ * A pair is over the cap when its share of the session's spins so far is at or
+ * above the cap. With no spins recorded nothing is capped.
+ */
+export function isPairOverCap(history: PairHistory, key: string, capPct: number): boolean {
+  if (history.total === 0) return false;
+  const count = history.counts[key] ?? 0;
+  return (count / history.total) * 100 >= capPct;
+}
+
+/**
+ * Validate a pair cap setting. Anything outside (0, 100] is rejected and the
+ * default is used instead, so a bad sheet value can never block every pair.
+ */
+export function normalizePairCapPct(raw: unknown): { value: number; valid: boolean } {
+  const value = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+  if (Number.isFinite(value) && value > 0 && value <= 100) {
+    return { value, valid: true };
+  }
+  return { value: DEFAULT_PAIR_CAP_PCT, valid: false };
+}
+
+// ---------------------------------------------------------------------------
+// Spins
+// ---------------------------------------------------------------------------
+
+export interface SpinInput {
+  seed: string;
+  config?: RingConfig;
+  history?: PairHistory;
+  pairCapPct?: number;
+}
+
+/** A normal spin across all three rings. */
+export function spin({
+  seed,
+  config = DEFAULT_RING_CONFIG,
+  history = emptyPairHistory(),
+  pairCapPct = DEFAULT_PAIR_CAP_PCT,
+}: SpinInput): SpinOutcome {
+  const regions = requireEligible(config, 'region');
+  const taxa = requireEligible(config, 'taxon');
+  const statuses = requireEligible(config, 'iucn');
+  const rng = createRng(seed);
   const flags: string[] = [];
 
-  // Pick A, B, C
-  const pickA = seededPick(seed, 'A', rings.A);
-  let pickB = seededPick(seed, 'B', rings.B);
-  let pickC = seededPick(seed, 'C', rings.C);
+  // Draw order is fixed so a seed always replays the same way.
+  let region = weightedPick(regions, rng).label;
+  let taxon = weightedPick(taxa, rng).label;
+  const iucn = weightedPick(statuses, rng).label;
 
-  // Final mode: reroll C if duplicate
-  if (mode === 'final') {
-    for (let i = 0; i < 10; i++) {
-      if (duplicateFinal(pickA.value.label, pickB.value.label, pickC.value.label)) {
-        seed = randomSeed();
-        pickC = seededPick(seed, 'C', rings.C);
-        flags.push('final_dup_reroll');
-      } else {
-        break;
+  if (isPairOverCap(history, pairKey(region, taxon), pairCapPct)) {
+    // Redraw from the allowed pairs only. Weighting each pair by the product
+    // of its ring weights gives the same distribution as redrawing both rings
+    // until an allowed pair comes up, without any retry limit.
+    const allowed: { region: Region; taxon: Taxon; weight: number }[] = [];
+    for (const r of regions) {
+      for (const t of taxa) {
+        if (!isPairOverCap(history, pairKey(r.label, t.label), pairCapPct)) {
+          allowed.push({ region: r.label, taxon: t.label, weight: r.weight * t.weight });
+        }
       }
     }
-  }
-
-  // Midterm mode: reroll B if pair exceeds cap
-  if (mode === 'midterm') {
-    for (let i = 0; i < 10; i++) {
-      if (pairExceedsCap(pickA.value.label, pickB.value.label, pairCapPct)) {
-        seed = randomSeed();
-        pickB = seededPick(seed, 'B', rings.B);
-        flags.push('midterm_pair_cap');
-      } else {
-        break;
-      }
+    if (allowed.length === 0) {
+      throw new SpinError(
+        'pair_cap_exhausted',
+        `The ${pairCapPct}% pair cap leaves no Region and Taxon combination available. Raise the pair cap or allow more options on the Admin page.`
+      );
     }
+    const redraw = weightedPick(allowed, rng);
+    region = redraw.region;
+    taxon = redraw.taxon;
+    flags.push('pair_cap_reroll');
   }
 
-  // Random event: configurable probability (default 2%)
-  let randomEvent: string | null = null;
-  if (Math.random() < randomEventProbability) {
-    randomEvent = 'sparkles';
-    flags.push('random_event_sparkles');
-  }
+  return { region, taxon, iucn, seed, flags, plantaeMercy: false, vetoUsed: false };
+}
 
-  const results: SpinResultNew = {
-    A: pickA.value.label,
-    B: pickB.value.label,
-    C: pickC.value.label,
-    seed,
-    flags: [...flags],
-    plantae_mercy: false,
-    veto_used: false,
-    is_test: false,
-  };
+export interface VetoInput {
+  seed: string;
+  current: SpinTriple & { plantaeMercy?: boolean };
+  target: RingKey;
+  config?: RingConfig;
+}
+
+/**
+ * Veto: re-spin exactly one ring. The other two rings are returned unchanged
+ * and the target ring always lands on a different value.
+ */
+export function vetoRespin({ seed, current, target, config = DEFAULT_RING_CONFIG }: VetoInput): SpinOutcome {
+  const options = (eligibleOptions(config, target) as RingOption[]).filter((o) => o.label !== current[target]);
+  if (options.length === 0) {
+    throw new SpinError('no_alternative', `There is no other option to land on for the ${target} ring.`);
+  }
+  const picked = weightedPick(options, createRng(seed)).label;
+  const flags = ['veto_respin', `veto_respin_${target}`];
+
+  // A mercy result stays a mercy result unless the taxon ring itself is re-spun.
+  const plantaeMercy = target !== 'taxon' && current.taxon === MERCY_TAXON && current.plantaeMercy === true;
+  if (plantaeMercy) flags.push('plantae_mercy');
 
   return {
+    region: current.region,
+    taxon: current.taxon,
+    iucn: current.iucn,
+    [target]: picked,
     seed,
-    results,
-    ruleFlags: flags,
-    randomEvent,
+    flags,
+    plantaeMercy,
+    vetoUsed: true,
+  } as SpinOutcome;
+}
+
+export interface MercyInput {
+  /** The result on screen, if any. Its IUCN status is kept. */
+  current: SpinTriple | null;
+  /** Region chosen by the teacher. */
+  region: Region;
+}
+
+/**
+ * Plantae Mercy: the teacher assigns Plantae with a chosen region.
+ * This is not a veto and does not count toward the pair cap.
+ *
+ * Nothing here is random, so the outcome carries no seed.
+ *
+ * The IUCN status is kept from the current result. With no result yet it is
+ * the first status in the list (LC), which is what the app has always
+ * recorded in that case. The `wildcard_iucn` flag marks the status as open.
+ * Whether mercy should be allowed before any spin is a teacher decision
+ * (D6 in docs/CONSOLIDATION.md); until then the long-standing behavior stays.
+ */
+export function plantaeMercy({ current, region }: MercyInput): SpinOutcome {
+  const iucn = current ? current.iucn : IUCN_STATUS[0];
+  return {
+    region,
+    taxon: MERCY_TAXON,
+    iucn,
+    seed: '',
+    flags: ['plantae_mercy', 'wildcard_iucn'],
+    plantaeMercy: true,
+    vetoUsed: false,
   };
-}
-
-// ============================================================================
-// Legacy SpinEngine class for backward compatibility
-// ============================================================================
-
-export interface SpinOptions {
-  weights?: RingWeights;
-  pairCapPercent?: number;
-  vetoedPairs?: Set<string>;
-  vetoedTriples?: Set<string>;
-  manualRegion?: Region;
-}
-
-export class SpinEngine {
-  private weights: RingWeights;
-  private pairCapPercent: number;
-  private vetoedPairs: Set<string>;
-  private vetoedTriples: Set<string>;
-  private spinHistory: SpinResult[] = [];
-
-  constructor(options: SpinOptions = {}) {
-    this.weights = options.weights || DEFAULT_WEIGHTS;
-    this.pairCapPercent = options.pairCapPercent || 12;
-    this.vetoedPairs = options.vetoedPairs || new Set();
-    this.vetoedTriples = options.vetoedTriples || new Set();
-  }
-
-  /**
-   * Perform a single spin across all three rings
-   */
-  spin(options: { 
-    manualRegion?: Region;
-    manualTaxon?: Taxon;
-    manualIUCN?: IUCN;
-  } = {}): SpinResult {
-    let attempts = 0;
-    const maxAttempts = 100;
-
-    // Filter out Plantae from random spins.
-    // Plantae results are only set via the UI mercy path, not from the engine.
-    const taxaForSpin = TAXA.filter(t => t !== 'Plantae');
-
-    while (attempts < maxAttempts) {
-      attempts++;
-
-      // Spin each ring
-      const region = options.manualRegion || this.spinRing(REGIONS, this.weights.regions);
-      const taxon = options.manualTaxon || this.spinRing(taxaForSpin, this.weights.taxa);
-      let iucn = options.manualIUCN || this.spinRing(IUCN_STATUS, this.weights.iucn);
-
-      const pairKey = `${region}:${taxon}`;
-      const tripleKey = `${region}:${taxon}:${iucn}`;
-
-      // Check pair cap constraint
-      if (this.isPairOverCap(pairKey)) {
-        continue;
-      }
-
-      // Check vetoed pairs
-      if (this.vetoedPairs.has(pairKey)) {
-        continue;
-      }
-
-      // Check exact triple veto
-      if (this.vetoedTriples.has(tripleKey)) {
-        continue;
-      }
-
-      const result: SpinResult = {
-        region,
-        taxon,
-        iucn,
-        timestamp: Date.now(),
-        plantaeMercyApplied: false,
-        manualRegion: options.manualRegion,
-      };
-
-      this.spinHistory.push(result);
-      return result;
-    }
-
-    // Fallback if all attempts fail (should be rare)
-    const fallbackResult: SpinResult = {
-      region: REGIONS[0],
-      taxon: TAXA[0],
-      iucn: 'LC',
-      timestamp: Date.now(),
-    };
-    this.spinHistory.push(fallbackResult);
-    return fallbackResult;
-  }
-
-  /**
-   * Spin a single ring with weighted selection
-   */
-  private spinRing<T extends Region | Taxon | IUCN>(
-    items: T[],
-    weights: Record<string, number>
-  ): T {
-    const itemWeights = items.map(item => weights[item] || 1);
-    return CryptoRNG.weightedSelect(items, itemWeights);
-  }
-
-  /**
-   * Check if a region-taxon pair exceeds the cap percentage
-   */
-  private isPairOverCap(pairKey: string): boolean {
-    if (this.spinHistory.length === 0) return false;
-
-    const pairCount = this.spinHistory.filter(
-      s => `${s.region}:${s.taxon}` === pairKey
-    ).length;
-
-    const percentage = (pairCount / this.spinHistory.length) * 100;
-    return percentage >= this.pairCapPercent;
-  }
-
-  /**
-   * Perform a single-ring veto spin
-   */
-  vetoSpinSingle(
-    currentResult: SpinResult,
-    target: 'region' | 'taxon' | 'iucn',
-    _options: { } = {}
-  ): { result: SpinResult; ruleFlags: string[] } {
-    const ruleFlags: string[] = [];
-    
-    // Start with a copy of the current result to ensure non-targets stay static
-    let region = currentResult.region;
-    let taxon = currentResult.taxon;
-    let iucn = currentResult.iucn;
-
-    if (target === 'region') {
-      if (REGIONS.length > 1) {
-        do {
-          region = this.spinRing(REGIONS, this.weights.regions);
-        } while (region === currentResult.region);
-      }
-      ruleFlags.push('veto_respin_region');
-    } else if (target === 'taxon') {
-      // Filter out Plantae from random spins.
-      // Plantae results are only set via the UI mercy path, not from the engine.
-      const taxaForSpin = TAXA.filter(t => t !== 'Plantae');
-      if (taxaForSpin.length > 1) {
-        do {
-          taxon = this.spinRing(taxaForSpin, this.weights.taxa);
-        } while (taxon === currentResult.taxon);
-      }
-      ruleFlags.push('veto_respin_taxon');
-    } else if (target === 'iucn') {
-      if (IUCN_STATUS.length > 1) {
-        do {
-          iucn = this.spinRing(IUCN_STATUS, this.weights.iucn);
-        } while (iucn === currentResult.iucn);
-      }
-      ruleFlags.push('veto_respin_iucn');
-    }
-
-    return {
-      result: {
-        region,
-        taxon,
-        iucn,
-        timestamp: Date.now(),
-        plantaeMercyApplied: false,
-        manualRegion: currentResult.manualRegion
-      },
-      ruleFlags
-    };
-  }
-
-  /**
-   * Veto a spin result (for re-spin functionality)
-   */
-  vetoSpin(result: SpinResult, vetoType: 'pair' | 'triple' = 'triple') {
-    if (vetoType === 'triple') {
-      const tripleKey = `${result.region}:${result.taxon}:${result.iucn}`;
-      this.vetoedTriples.add(tripleKey);
-    } else {
-      const pairKey = `${result.region}:${result.taxon}`;
-      this.vetoedPairs.add(pairKey);
-    }
-  }
-
-  /**
-   * Clear veto for a specific spin
-   */
-  clearVeto(result: SpinResult, vetoType: 'pair' | 'triple' = 'triple') {
-    if (vetoType === 'triple') {
-      const tripleKey = `${result.region}:${result.taxon}:${result.iucn}`;
-      this.vetoedTriples.delete(tripleKey);
-    } else {
-      const pairKey = `${result.region}:${result.taxon}`;
-      this.vetoedPairs.delete(pairKey);
-    }
-  }
-
-  /**
-   * Get spin history
-   */
-  getHistory(): SpinResult[] {
-    return [...this.spinHistory];
-  }
-
-  /**
-   * Clear spin history
-   */
-  clearHistory() {
-    this.spinHistory = [];
-  }
 }

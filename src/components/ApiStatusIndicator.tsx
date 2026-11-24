@@ -1,107 +1,92 @@
-import { useState, useEffect } from 'react';
-import { api, isApiConfigured } from '../api';
+import { useEffect, useState } from 'react';
+import { api, describeError, getApiConfig } from '../api';
 
 type ApiStatus = 'unconfigured' | 'checking' | 'ok' | 'error';
 
+const STYLES: Record<ApiStatus, { className: string; label: string; icon: string }> = {
+  unconfigured: { className: 'border-sun text-sun', label: 'Backend: not configured', icon: '!' },
+  checking: { className: 'border-line text-ink-dim', label: 'Backend: checking…', icon: '…' },
+  ok: { className: 'border-good text-good', label: 'Backend: connected', icon: '✓' },
+  error: { className: 'border-bad text-bad', label: 'Backend: error', icon: '✗' },
+};
+
 /**
- * ApiStatusIndicator
- *
- * Displays the current API connection status.
- * - If API is not configured (missing env vars), shows "unconfigured".
- * - On mount, calls api.health() to verify connectivity.
- * - Shows "ok" or "error" based on result.
+ * Shows whether the backend health check passed.
+ * "Connected" means the token was accepted and all four sheet tabs exist.
  */
 export const ApiStatusIndicator = () => {
-  const [status, setStatus] = useState<ApiStatus>(
-    isApiConfigured() ? 'checking' : 'unconfigured'
-  );
+  const configured = getApiConfig().problems.length === 0;
+  const [status, setStatus] = useState<ApiStatus>(configured ? 'checking' : 'unconfigured');
+  const [detail, setDetail] = useState('');
+  const [notes, setNotes] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!isApiConfigured()) {
-      setStatus('unconfigured');
-      return;
-    }
-
-    api.health()
-      .then((res) => {
-        if (res.status === 'ok') {
-          setStatus('ok');
-        } else {
-          setStatus('error');
-          console.error('API health check returned unexpected status:', res);
-        }
+    if (!configured) return;
+    let cancelled = false;
+    api
+      .health()
+      .then((health) => {
+        if (cancelled) return;
+        setStatus('ok');
+        setNotes([
+          ...(health.contract === null
+            ? ['Older backend version: it cannot confirm that every field of a spin was stored.']
+            : []),
+          ...health.warnings,
+        ]);
       })
       .catch((err) => {
+        if (cancelled) return;
         setStatus('error');
-        console.error('API health check failed:', err);
+        setDetail(describeError(err));
       });
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [configured]);
 
-  const statusStyles: Record<ApiStatus, { bg: string; text: string; label: string }> = {
-    unconfigured: {
-      bg: 'bg-yellow-100 border-yellow-400',
-      text: 'text-yellow-800',
-      label: 'API: Not Configured',
-    },
-    checking: {
-      bg: 'bg-gray-100 border-gray-400',
-      text: 'text-gray-600',
-      label: 'API: Checking...',
-    },
-    ok: {
-      bg: 'bg-green-100 border-green-400',
-      text: 'text-green-800',
-      label: 'API: OK',
-    },
-    error: {
-      bg: 'bg-red-100 border-red-400',
-      text: 'text-red-800',
-      label: 'API: Error – see console',
-    },
-  };
-
-  const style = statusStyles[status];
+  const style = STYLES[status];
 
   return (
-    <div className={`inline-flex items-center px-3 py-1 rounded-full border text-sm font-medium ${style.bg} ${style.text}`}>
-      {status === 'ok' && <span className="mr-1">✓</span>}
-      {status === 'error' && <span className="mr-1">✗</span>}
-      {status === 'unconfigured' && <span className="mr-1">⚠</span>}
-      {status === 'checking' && <span className="mr-1 animate-pulse">●</span>}
-      {style.label}
+    <div className="flex flex-col items-end gap-1" data-testid="api-status" data-status={status}>
+      <span
+        className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm font-bold ${style.className}`}
+        role="status"
+      >
+        <span aria-hidden="true">{style.icon}</span>
+        {style.label}
+      </span>
+      {status === 'error' && detail && <span className="max-w-xs text-right text-xs text-bad">{detail}</span>}
+      {status === 'ok' &&
+        notes.map((note) => (
+          <span key={note} className="max-w-xs text-right text-xs text-sun" data-testid="api-note">
+            {note}
+          </span>
+        ))}
     </div>
   );
 };
 
 /**
- * ApiNotConfiguredBanner
- *
- * Full-width warning banner shown when API is not configured.
- * Includes instructions for fixing the issue.
+ * Full-width warning shown when the API cannot be used, listing exactly why.
  */
 export const ApiNotConfiguredBanner = () => {
-  if (isApiConfigured()) return null;
+  const { problems } = getApiConfig();
+  if (problems.length === 0) return null;
 
   return (
-    <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
-      <div className="flex">
-        <div className="flex-shrink-0">
-          <span className="text-yellow-400 text-xl">⚠️</span>
-        </div>
-        <div className="ml-3">
-          <h3 className="text-sm font-medium text-yellow-800">
-            Ringwheel API is not configured
-          </h3>
-          <p className="mt-1 text-sm text-yellow-700">
-            Check <code className="bg-yellow-100 px-1 rounded">VITE_SPIN_API_URL</code> and{' '}
-            <code className="bg-yellow-100 px-1 rounded">VITE_RINGWHEEL_API_TOKEN</code> in your{' '}
-            <code className="bg-yellow-100 px-1 rounded">.env</code> file.
-          </p>
-          <p className="mt-1 text-sm text-yellow-700">
-            Spins will not be logged until the API is properly configured.
-          </p>
-        </div>
-      </div>
+    <div className="rounded-xl border-2 border-sun bg-sun/10 p-4" role="alert" data-testid="api-not-configured">
+      <h2 className="text-lg font-bold text-sun">Spins are NOT being saved</h2>
+      <p className="mt-1">The Ringwheel backend is not configured, so this page cannot load the roster or log spins.</p>
+      <ul className="mt-2 list-disc pl-6">
+        {problems.map((problem) => (
+          <li key={problem}>{problem}</li>
+        ))}
+      </ul>
+      <p className="mt-2 text-sm text-ink-dim">
+        Set the connection on the Admin page, or set <code>VITE_SPIN_API_URL</code> and{' '}
+        <code>VITE_RINGWHEEL_API_TOKEN</code> in <code>.env.local</code> for local development.
+      </p>
     </div>
   );
 };

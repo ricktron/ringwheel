@@ -1,4 +1,3 @@
-import React from 'react';
 import type { SpinLogRow } from '../types';
 
 interface ResultsPanelProps {
@@ -8,81 +7,58 @@ interface ResultsPanelProps {
   onReroll?: (row: SpinLogRow) => void;
 }
 
-export const ResultsPanel: React.FC<ResultsPanelProps> = ({
-  rows,
-  loading,
-  error,
-  onReroll,
-}) => {
+/** Today's spins as recorded in the SpinsLog sheet. */
+export const ResultsPanel = ({ rows, loading, error, onReroll }: ResultsPanelProps) => {
   if (loading) {
-    return <div className="text-gray-500 text-sm p-4">Loading spins...</div>;
+    return <p className="text-ink-dim">Loading spins…</p>;
   }
 
   if (error) {
-    return <div className="text-red-500 text-sm p-4">Error: {error}</div>;
-  }
-
-  if (rows.length === 0) {
     return (
-      <div className="text-gray-500 text-sm p-4">
-        No spins recorded yet for this date/period.
-      </div>
+      <p className="text-bad" role="alert">
+        {error}
+      </p>
     );
   }
 
+  if (rows.length === 0) {
+    return <p className="text-ink-dim">No spins recorded yet for this date and period.</p>;
+  }
+
   return (
-    <div className="overflow-x-auto border border-gray-200 rounded-lg shadow-sm">
-      <table className="min-w-full divide-y divide-gray-200 text-sm">
-        <thead className="bg-gray-50">
+    <div className="overflow-x-auto rounded-lg border border-line">
+      <table className="min-w-full text-sm" data-testid="logged-spins">
+        <thead className="bg-panel-raised text-left text-ink-dim">
           <tr>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Time</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Name</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Period</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Region</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Taxon</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">IUCN</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Flags</th>
-            <th className="px-3 py-2 text-left font-medium text-gray-500">Actions</th>
+            {['Time', 'Name', 'Period', 'Region', 'Taxon', 'IUCN', 'Flags', 'Actions'].map((heading) => (
+              <th key={heading} scope="col" className="px-3 py-2 font-semibold">
+                {heading}
+              </th>
+            ))}
           </tr>
         </thead>
-        <tbody className="bg-white divide-y divide-gray-200">
+        <tbody>
           {rows.map((row, idx) => {
-            const timeStr = new Date(row.timestamp_iso).toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-            });
-            
+            const timeStr = new Date(row.timestamp_iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const flags = [
-              ...(row.rule_flags || []),
+              ...row.rule_flags,
               row.plantae_mercy ? 'Mercy' : null,
               row.veto_used ? 'Veto' : null,
-            ].filter(Boolean);
+              row.is_test ? 'Test' : null,
+            ].filter((flag): flag is string => Boolean(flag));
 
             return (
-              <tr key={idx} className="hover:bg-gray-50">
-                <td className="px-3 py-2 whitespace-nowrap text-gray-500">{timeStr}</td>
-                <td className="px-3 py-2 whitespace-nowrap font-medium text-gray-900">
-                  {row.student_name || '(none)'}
-                </td>
-                <td className="px-3 py-2 whitespace-nowrap text-gray-500">{row.period}</td>
-                <td className="px-3 py-2 whitespace-nowrap text-gray-700">{row.result_region}</td>
-                <td className="px-3 py-2 whitespace-nowrap text-gray-700">{row.result_taxon}</td>
-                <td className="px-3 py-2 whitespace-nowrap text-gray-700">{row.result_iucn}</td>
-                <td className="px-3 py-2 whitespace-nowrap">
+              <tr key={`${row.timestamp_iso}-${idx}`} className="border-t border-line">
+                <td className="px-3 py-2 whitespace-nowrap text-ink-dim">{timeStr}</td>
+                <td className="px-3 py-2 whitespace-nowrap font-semibold">{row.student_name || '(none)'}</td>
+                <td className="px-3 py-2 whitespace-nowrap text-ink-dim">{row.period}</td>
+                <td className="px-3 py-2 whitespace-nowrap">{row.result_region}</td>
+                <td className="px-3 py-2 whitespace-nowrap">{row.result_taxon}</td>
+                <td className="px-3 py-2 whitespace-nowrap">{row.result_iucn}</td>
+                <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
-                    {flags.map((flag, i) => (
-                      <span
-                        key={i}
-                        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                          flag === 'Mercy'
-                            ? 'bg-green-100 text-green-800'
-                            : flag === 'Veto'
-                            ? 'bg-red-100 text-red-800'
-                            : flag === 'wildcard_iucn'
-                            ? 'bg-purple-100 text-purple-800'
-                            : 'bg-gray-100 text-gray-800'
-                        }`}
-                      >
+                    {flags.map((flag) => (
+                      <span key={flag} className="rounded border border-line px-2 py-0.5 text-xs text-ink-dim">
                         {flag}
                       </span>
                     ))}
@@ -90,10 +66,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 </td>
                 <td className="px-3 py-2 whitespace-nowrap">
                   {onReroll && (
-                    <button
-                      onClick={() => onReroll(row)}
-                      className="text-indigo-600 hover:text-indigo-900 text-xs font-medium border border-indigo-200 rounded px-2 py-1 hover:bg-indigo-50 transition-colors"
-                    >
+                    <button type="button" className="btn text-xs" onClick={() => onReroll(row)}>
                       Re-roll
                     </button>
                   )}

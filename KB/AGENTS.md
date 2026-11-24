@@ -117,43 +117,60 @@ Log spins for basic history and future analytics, without becoming a grading or 
 The canonical definition of behavior, architecture, and fairness lives in the Ringwheel Master Guide.
 Use this AGENTS.md as the repo-local implementation contract and workflow guide.
 
-1.2 Typical structure
-Actual layout may evolve, but the repo is expected to look roughly like:
+1.2 Current structure
+Updated 2026-11-24 to match the repository after the consolidation of the
+ringwheel-classroom-spinner prototype (see docs/CONSOLIDATION.md).
 
 text
-Copy code
 ringwheel/
-  src/                  # Frontend (React or similar)
-    components/
-    pages/
+  src/                    # Frontend (Vite, React, TypeScript, Tailwind CSS 4)
+    api.ts                # The ONLY module that talks to the backend
+    components/           # RingWheel, ResultPanel, SessionSpins, AutoTestPanel, ...
+    pages/                # SpinPage, AdminPage
+    services/audio.ts     # Sound effects
     utils/
-    ...
-  gas/                  # Apps Script backend (Code.gs, appsscript.json, etc.)
+      spin-engine.ts      # The ONLY place a spin is decided (sensitive core)
+      settings.ts         # Settings sheet rows <-> typed settings, merge-safe saves
+      rings.ts            # Rings sheet rows -> engine config, merge-safe saves
+      roster.ts           # Class queue building
+      spin-log.ts         # SpinsLog row building
+    **/*.test.ts          # Unit tests (vitest)
+  gas/                    # Apps Script backend: the only backend
     Code.gs
     appsscript.json
-  schema/               # CSV-like schema docs or sample files
+    README.md             # Contract summary, deploy, verify, roll back
+  schema/                 # Sheet headers with synthetic sample rows
     Roster.csv
     Rings.csv
     Settings.csv
     SpinsLog.csv
-  kb/
-    Ringwheel_KB_01_AI_Development_Working_Agreements.md
+  tests/gas/              # Backend test harness (fake Sheets) and contract tests
+  e2e/                    # Browser smoke test and local fake backend
+  docs/                   # CONSOLIDATION.md, verification.md
+  KB/                     # Project knowledge base
+    AGENTS.md             # This file
+    Ringwheel_KB_01_AI_Development.md   # The Working Agreements
     Ringwheel_Master_Guide_v1.md
     Ringwheel_README_Using_The_KB.md
-    ...
-  public/               # Static assets (if applicable)
+  .github/workflows/ci.yml
   .env.example
   package.json
-  AGENTS.md             # This file
+
 Key points:
 
-gas/Code.gs (and related files) define the Apps Script Web App API and how it talks to Sheets.
+gas/Code.gs defines the Apps Script Web App API and how it talks to Sheets. There is no other backend.
 
-schema/*.csv define the conceptual schema for roster, rings, settings, and spin logs.
+schema/*.csv define the sheet contracts for roster, rings, settings, and spin logs. They hold synthetic sample rows only. Never put real student data in this repository; it is public.
 
-src/ contains the frontend spinner UI and any client-side spin engine logic.
+src/utils/spin-engine.ts is the single source of truth for spin behavior. Do not add a second spin path.
 
-kb/ holds the core KB that all non-trivial work must respect.
+src/api.ts is the single API client. Do not call fetch from components.
+
+KB/ holds the core KB that all non-trivial work must respect.
+
+File name note: this KB refers to the Working Agreements as
+kb/Ringwheel_KB_01_AI_Development_Working_Agreements.md. In this repository that
+document is KB/Ringwheel_KB_01_AI_Development.md. They are the same file.
 
 If the real structure differs, update this section to match reality.
 
@@ -384,33 +401,50 @@ AGENTS.md (this file)
 Relevant KB docs
 
 4. Commands and tooling
-Check package.json for the actual scripts; the following pattern is expected but not guaranteed:
+These scripts exist in package.json (verified 2026-11-24):
 
 Install dependencies:
 
 sh
-Copy code
 npm install
+
 Run dev server (frontend):
 
 sh
-Copy code
 npm run dev
-Build for production:
+
+Run a local fake backend with synthetic data (no Google access):
 
 sh
-Copy code
-npm run build
-Lint (if configured):
+npm run mock:backend
+
+Lint:
 
 sh
-Copy code
 npm run lint
-Before you assume a script exists, verify it in package.json. If it doesn’t exist:
 
-Do not invent new workflows silently.
+Type check and build for production:
 
-If adding a new script is part of the task, document it here after you add it.
+sh
+npm run build
+
+Unit and contract tests (spin rules, API client, backend contract):
+
+sh
+npm test
+
+Browser smoke test (needs: npx playwright install chromium):
+
+sh
+npm run test:e2e
+
+Lint, build and unit tests together:
+
+sh
+npm run check
+
+All of these must pass before a change is proposed. A change to spin-engine.ts, api.ts or
+gas/Code.gs must come with a test. None of the tests contact the live backend.
 
 For Apps Script:
 
