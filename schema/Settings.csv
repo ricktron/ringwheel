@@ -1,3 +1,9 @@
 key,value,notes
-midterm_pair_cap_pct,12,Cap for A|B pairs in midterm mode
-mode,midterm,midterm or final
+midterm_pair_cap_pct,12,"Pair cap. A Region and Taxon pair is not allowed while it makes up this percent or more of the session's spins. Above 0, at most 100."
+mode,midterm,Reserved. Not read by the app.
+enableAudio,true,Sound effects on or off.
+enableConfetti,true,Confetti on or off.
+enablePlantaeMercy,true,Show the Plantae Mercy button.
+tickerSpeed,100,Milliseconds between tick sounds. 50 to 500.
+applyRingWeights,false,"false: every option is equally likely. true: spins follow weight and active in the Rings sheet."
+enableTestHarness,false,Show the auto test harness on the spin page outside of local development.
