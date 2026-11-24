@@ -85,10 +85,16 @@ describe('authentication', () => {
 
 describe('read routes', () => {
   it('health is ok when all tabs exist and degraded when one is missing', () => {
-    expect(runtime().get({ type: 'health', token: T }).json).toEqual({ status: 'ok' });
+    expect(runtime().get({ type: 'health', token: T }).json).toEqual({ status: 'ok', contract: 2, warnings: [] });
     const sheets = syntheticSheets();
     delete (sheets as Record<string, unknown>).SpinsLog;
-    expect(runtime({ sheets }).get({ type: 'health', token: T }).json).toEqual({ status: 'degraded', missing: ['SpinsLog'] });
+    expect(runtime({ sheets }).get({ type: 'health', token: T }).json).toEqual({
+      status: 'degraded',
+      contract: 2,
+      missing: ['SpinsLog'],
+      problems: [],
+      warnings: [],
+    });
   });
 
   it('roster returns the documented shape and skips blank rows', () => {
@@ -116,7 +122,7 @@ describe('read routes', () => {
 
   it('type is case-insensitive and unknown types return Not Found', () => {
     const rt = runtime();
-    expect(rt.get({ type: 'HEALTH', token: T }).json).toEqual({ status: 'ok' });
+    expect(rt.get({ type: 'HEALTH', token: T }).json.status).toBe('ok');
     expect(rt.get({ type: 'nope', token: T }).content).toBe('Not Found');
     expect(rt.get({ token: T }).content).toBe('Not Found');
     expect(rt.post({ type: 'nope', token: T }).content).toBe('Not Found');
@@ -126,9 +132,9 @@ describe('read routes', () => {
 describe('logspin (append-only)', () => {
   it('appends exactly one row in header order and leaves earlier rows untouched', () => {
     const rt = runtime();
-    expect(rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json).toEqual({ ok: true });
+    expect(rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json).toEqual({ ok: true, complete: true });
     const snapshot = JSON.stringify(rt.rows('SpinsLog'));
-    expect(rt.post({ type: 'logspin', payload: spinPayload({ student_name: 'Ben Placeholder', seed: 'ffff' }), token: T }).json).toEqual({ ok: true });
+    expect(rt.post({ type: 'logspin', payload: spinPayload({ student_name: 'Ben Placeholder', seed: 'ffff' }), token: T }).json).toEqual({ ok: true, complete: true });
 
     const rows = rt.rows('SpinsLog');
     expect(rows).toHaveLength(3);
@@ -158,20 +164,10 @@ describe('logspin (append-only)', () => {
 
   it('starts an empty tab with the frozen header row', () => {
     const rt = runtime({ sheets: { ...syntheticSheets(), SpinsLog: [] } });
-    expect(rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json).toEqual({ ok: true });
+    expect(rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json).toEqual({ ok: true, complete: true });
     const rows = rt.rows('SpinsLog');
     expect(rows[0]).toEqual(syntheticSheets().SpinsLog[0]);
     expect(rows[1][3]).toBe('Ada Sample');
-  });
-
-  it('still logs, with a warning, when the sheet is missing a column', () => {
-    const sheets = syntheticSheets();
-    sheets.SpinsLog = [['timestamp_iso', 'student_name', 'result_A', 'result_B', 'result_C']];
-    const rt = runtime({ sheets });
-    const res = rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json;
-    expect(res.ok).toBe(true);
-    expect(res.warnings[0]).toMatch(/missing these columns.*is_test/);
-    expect(rt.rows('SpinsLog')[1]).toEqual(['2026-11-24T15:30:00.000Z', 'Ada Sample', 'Nearctic', 'Aves', 'LC']);
   });
 
   it('stores client text as text, never as a spreadsheet formula', () => {
@@ -203,6 +199,230 @@ describe('logspin (append-only)', () => {
     const res = rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json;
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/Simulated Sheets failure/);
+  });
+});
+
+describe('SpinsLog schema mismatch: a record is complete, incomplete, or refused, and says which', () => {
+  const ALL = ['timestamp_iso', 'session_id', 'period', 'student_name', 'email', 'result_A', 'result_B', 'result_C', 'plantae_mercy', 'veto_used', 'seed', 'is_test', 'rule_flags_json'];
+  const REQUIRED = ['timestamp_iso', 'period', 'student_name', 'email', 'result_A', 'result_B', 'result_C'];
+  const OPTIONAL = ALL.filter((c) => !REQUIRED.includes(c));
+  const withHeaders = (headers: string[], extraRows: unknown[][] = []) => {
+    const sheets = syntheticSheets();
+    // An empty header list means a completely empty tab, as in a new spreadsheet.
+    sheets.SpinsLog = headers.length === 0 ? [] : [headers, ...extraRows];
+    return runtime({ sheets });
+  };
+  const log = (rt: ReturnType<typeof runtime>, extra: Record<string, unknown> = {}) =>
+    rt.post({ type: 'logspin', payload: spinPayload(extra), token: T }).json;
+
+  it('complete: every column present', () => {
+    const rt = withHeaders(ALL);
+    expect(log(rt)).toEqual({ ok: true, complete: true });
+    expect(rt.rows('SpinsLog')).toHaveLength(2);
+  });
+
+  it('complete is also reported when the columns are in a different order or the sheet has extras', () => {
+    const rt = withHeaders(['teacher_note', ...[...ALL].reverse()]);
+    expect(log(rt)).toEqual({ ok: true, complete: true });
+    const [headers, row] = rt.rows('SpinsLog');
+    expect(row[headers.indexOf('student_name')]).toBe('Ada Sample');
+    expect(row[headers.indexOf('teacher_note')]).toBe('');
+  });
+
+  it.each(REQUIRED)('refused: required column %s is absent, and no partial row is written', (column) => {
+    const existing = ALL.filter((c) => c !== column).map(() => 'earlier value');
+    const rt = withHeaders(ALL.filter((c) => c !== column), [existing]);
+    const before = JSON.stringify(rt.rows('SpinsLog'));
+    const res = log(rt);
+    expect(res.ok).toBe(false);
+    expect(res.complete).toBeUndefined();
+    expect(res.missing_required).toEqual([column]);
+    expect(res.error).toBe(`Nothing was logged. The SpinsLog sheet is missing required columns: ${column}.`);
+    expect(JSON.stringify(rt.rows('SpinsLog'))).toBe(before);
+  });
+
+  it('refused: lists every required column that is absent', () => {
+    const rt = withHeaders(['timestamp_iso', 'student_name', 'result_A', 'result_B', 'result_C']);
+    const res = log(rt);
+    expect(res.ok).toBe(false);
+    expect(res.missing_required).toEqual(['period', 'email']);
+    expect(rt.rows('SpinsLog')).toHaveLength(1);
+  });
+
+  it.each(OPTIONAL)('incomplete: optional column %s is absent, the row is written and reported as incomplete', (column) => {
+    const rt = withHeaders(ALL.filter((c) => c !== column));
+    const res = log(rt);
+    expect(res.ok).toBe(true);
+    expect(res.complete).toBe(false);
+    expect(res.missing_optional).toEqual([column]);
+    expect(res.warnings[0]).toContain(column);
+    const [headers, row] = rt.rows('SpinsLog');
+    expect(row).toHaveLength(ALL.length - 1);
+    // Everything that does have a column was stored.
+    expect(row[headers.indexOf('student_name')]).toBe('Ada Sample');
+    expect(row[headers.indexOf('result_B')]).toBe('Aves');
+  });
+
+  it('incomplete: only the required columns exist', () => {
+    const rt = withHeaders(REQUIRED);
+    const res = log(rt);
+    expect(res).toMatchObject({ ok: true, complete: false, missing_optional: OPTIONAL });
+    expect(rt.rows('SpinsLog')[1]).toEqual(['2026-11-24T15:30:00.000Z', 'A', 'Ada Sample', 'ada.sample@example.com', 'Nearctic', 'Aves', 'LC']);
+  });
+
+  it('never answers "complete" when a field was dropped', () => {
+    // Every proper subset of the optional columns must be reported as not complete.
+    for (let mask = 0; mask < 2 ** OPTIONAL.length - 1; mask++) {
+      const present = OPTIONAL.filter((_, i) => mask & (1 << i));
+      const res = log(withHeaders([...REQUIRED, ...present]));
+      expect(res.ok).toBe(true);
+      expect(res.complete).toBe(false);
+      expect([...res.missing_optional].sort()).toEqual(OPTIONAL.filter((c) => !present.includes(c)).sort());
+    }
+  });
+
+  it('a test spin is refused when there is no is_test column, so it can never pass for a real spin', () => {
+    const rt = withHeaders(ALL.filter((c) => c !== 'is_test'));
+    const res = log(rt, { is_test: true, student_name: '', email: '', rule_flags_json: '["auto_test_run"]' });
+    expect(res.ok).toBe(false);
+    expect(res.missing_required).toEqual(['is_test']);
+    expect(rt.rows('SpinsLog')).toHaveLength(1);
+    // A real spin into the same sheet is still written, as incomplete.
+    expect(log(rt)).toMatchObject({ ok: true, complete: false, missing_optional: ['is_test'] });
+  });
+
+  it('column names must match exactly apart from surrounding spaces', () => {
+    expect(log(withHeaders(ALL.map((c) => ` ${c} `)))).toEqual({ ok: true, complete: true });
+    const res = log(withHeaders(ALL.map((c) => (c === 'email' ? 'Email' : c))));
+    expect(res.ok).toBe(false);
+    expect(res.missing_required).toEqual(['email']);
+  });
+
+  it('health reports the same problems before any spin is attempted', () => {
+    expect(withHeaders(ALL).get({ type: 'health', token: T }).json).toEqual({ status: 'ok', contract: 2, warnings: [] });
+
+    expect(withHeaders(REQUIRED).get({ type: 'health', token: T }).json).toEqual({
+      status: 'ok',
+      contract: 2,
+      warnings: ['SpinsLog has no column for: session_id, plantae_mercy, veto_used, seed, is_test, rule_flags_json'],
+    });
+
+    const broken = withHeaders(['timestamp_iso', 'student_name', 'result_A', 'result_B', 'result_C']).get({ type: 'health', token: T }).json;
+    expect(broken.status).toBe('degraded');
+    expect(broken.problems).toEqual(['SpinsLog is missing required columns: period, email']);
+
+    // A brand new, empty SpinsLog tab is fine: the header is created on the first spin.
+    expect(withHeaders([]).get({ type: 'health', token: T }).json.status).toBe('ok');
+  });
+
+  it('health also catches a roster or settings tab the app cannot read', () => {
+    const sheets = syntheticSheets();
+    sheets.Roster = [['period', 'class', 'first', 'last', 'email', 'group', 'id'], ['1', 'Bio', 'Alex', 'Sample', 'alex@example.com', 'A', '101']];
+    sheets.Settings = [['Key', 'Value']];
+    const health = runtime({ sheets }).get({ type: 'health', token: T }).json;
+    expect(health.status).toBe('degraded');
+    expect(health.problems).toEqual([
+      'Settings is missing required columns: key, value',
+      'Roster has neither an "S1 Period" nor an "S2 Period" column',
+    ]);
+  });
+
+  it('a failure half way through a first write is reported as a failure', () => {
+    // Empty tab: the header row goes in, then the data row fails.
+    const rt = withHeaders([]);
+    const sheet = rt.sheet('SpinsLog');
+    let calls = 0;
+    const realAppend = sheet.appendRow.bind(sheet);
+    sheet.appendRow = (values: unknown[]) => {
+      calls++;
+      if (calls === 2) throw new Error('Simulated Sheets failure');
+      realAppend(values);
+    };
+    const res = log(rt);
+    expect(res.ok).toBe(false);
+    expect(res.complete).toBeUndefined();
+    // Only the header exists. There is no data row pretending to be a spin.
+    expect(rt.rows('SpinsLog')).toEqual([ALL]);
+    // The next attempt succeeds and is complete.
+    sheet.appendRow = realAppend;
+    expect(log(rt)).toEqual({ ok: true, complete: true });
+    expect(rt.rows('SpinsLog')).toHaveLength(2);
+  });
+});
+
+describe('concurrent edits: a save never silently overwrites someone else\'s change', () => {
+  const read = (rt: ReturnType<typeof runtime>, type: 'settings' | 'rings') => rt.get({ type, token: T }).json;
+
+  it('saves normally when the sheet is unchanged since it was read', () => {
+    const rt = runtime();
+    const base = read(rt, 'settings');
+    const rows = base.map((r: Record<string, unknown>) => (r.key === 'mode' ? { ...r, value: 'final' } : r));
+    expect(rt.post({ type: 'writesettings', rows, base_rows: base, token: T }).json).toEqual({ ok: true, rows: 4 });
+    expect(rt.rows('Settings')[2]).toEqual(['mode', 'final', 'midterm or final']);
+  });
+
+  it.each([
+    ['a row was added', (sheet: { rows: unknown[][] }) => sheet.rows.push(['added_in_sheets', 'yes', 'by a colleague'])],
+    ['a value was changed', (sheet: { rows: unknown[][] }) => (sheet.rows[1][1] = 25)],
+    ['a note was changed', (sheet: { rows: unknown[][] }) => (sheet.rows[2][2] = 'updated note')],
+    ['a row was deleted', (sheet: { rows: unknown[][] }) => sheet.rows.splice(3, 1)],
+    ['rows were reordered', (sheet: { rows: unknown[][] }) => sheet.rows.splice(1, 2, sheet.rows[2], sheet.rows[1])],
+  ])('refuses the save when %s in the meantime, and keeps that change', (_name, edit) => {
+    const rt = runtime();
+    const base = read(rt, 'settings');
+    edit(rt.sheet('Settings'));
+    const afterEdit = JSON.stringify(rt.rows('Settings'));
+
+    const rows = base.map((r: Record<string, unknown>) => (r.key === 'mode' ? { ...r, value: 'final' } : r));
+    const res = rt.post({ type: 'writesettings', rows, base_rows: base, token: T }).json;
+    expect(res).toEqual({
+      ok: false,
+      conflict: true,
+      error: 'The Settings sheet was changed by someone else after it was loaded. Nothing was saved. Reload and try again.',
+    });
+    expect(JSON.stringify(rt.rows('Settings'))).toBe(afterEdit);
+  });
+
+  it('protects the Rings sheet the same way', () => {
+    const rt = runtime();
+    const base = read(rt, 'rings');
+    rt.sheet('Rings').rows[3][5] = false; // someone switches a slice off in Sheets
+    const afterEdit = JSON.stringify(rt.rows('Rings'));
+    const rows = base.map((r: Record<string, unknown>) => (r.label === 'Nearctic' ? { ...r, weight: 3 } : r));
+    expect(rt.post({ type: 'writerings', rows, base_rows: base, token: T }).json.conflict).toBe(true);
+    expect(JSON.stringify(rt.rows('Rings'))).toBe(afterEdit);
+  });
+
+  it('ignores differences that are not data: blank rows and key order', () => {
+    const rt = runtime();
+    const base = read(rt, 'settings');
+    rt.sheet('Settings').rows.push(['', '', '']);
+    const reordered = base.map((r: Record<string, unknown>) => ({ notes: r.notes, value: r.value, key: r.key }));
+    expect(rt.post({ type: 'writesettings', rows: base, base_rows: reordered, token: T }).json.ok).toBe(true);
+  });
+
+  it('after reloading, the same edit goes through and the other person\'s row is still there', () => {
+    const rt = runtime();
+    const stale = read(rt, 'settings');
+    rt.sheet('Settings').rows.push(['added_in_sheets', 'yes', 'by a colleague']);
+    expect(rt.post({ type: 'writesettings', rows: stale, base_rows: stale, token: T }).json.conflict).toBe(true);
+
+    const fresh = read(rt, 'settings');
+    const rows = fresh.map((r: Record<string, unknown>) => (r.key === 'mode' ? { ...r, value: 'final' } : r));
+    expect(rt.post({ type: 'writesettings', rows, base_rows: fresh, token: T }).json.ok).toBe(true);
+    const keys = rt.rows('Settings').map((r: unknown[]) => r[0]);
+    expect(keys).toContain('added_in_sheets');
+    expect(rt.rows('Settings').find((r: unknown[]) => r[0] === 'mode')).toEqual(['mode', 'final', 'midterm or final']);
+  });
+
+  it('requests without base_rows behave as before, so older clients keep working', () => {
+    const rt = runtime();
+    rt.sheet('Settings').rows.push(['added_in_sheets', 'yes', '']);
+    expect(rt.post({ type: 'writesettings', rows: [{ key: 'mode', value: 'final' }], token: T }).json.ok).toBe(true);
+    expect(rt.post({ type: 'writesettings', rows: [{ key: 'mode', value: 'final' }], base_rows: 'nonsense', token: T }).json).toEqual({
+      ok: false,
+      error: 'base_rows must be a list.',
+    });
   });
 });
 
@@ -362,7 +582,7 @@ describe('optional admin token', () => {
     expect(rt.post({ type: 'writesettings', rows: [{ key: 'mode', value: 'final' }], admin_token: ADMIN }).content).toBe('Forbidden');
 
     expect(rt.post({ type: 'writesettings', rows: [{ key: 'mode', value: 'final' }], token: T, admin_token: ADMIN }).json.ok).toBe(true);
-    expect(rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json).toEqual({ ok: true });
+    expect(rt.post({ type: 'logspin', payload: spinPayload(), token: T }).json).toEqual({ ok: true, complete: true });
     expect(rt.get({ type: 'roster', token: T }).json).toHaveLength(5);
   });
 });
@@ -407,7 +627,7 @@ describe('frontend client and backend agree end to end', () => {
 
   it('reads health, roster, rings and settings', async () => {
     const client = connect(runtime());
-    await expect(client.health()).resolves.toEqual({ status: 'ok' });
+    await expect(client.health()).resolves.toEqual({ status: 'ok', warnings: [], contract: 2 });
     const roster = await client.roster();
     expect(roster.map((s) => `${s.first} ${s.last}`)).toEqual(['Ada Sample', 'Ben Placeholder', 'Cy Demo', 'Dee Fixture', 'Eli Testcase']);
     expect(await client.rings()).toHaveLength(25);
@@ -428,7 +648,7 @@ describe('frontend client and backend agree end to end', () => {
       student: { name: 'Ada Sample', email: 'ada.sample@example.com', period: 'A' },
       isTest: false,
     });
-    await expect(client.logSpin(payload)).resolves.toEqual({ ok: true, warnings: [] });
+    await expect(client.logSpin(payload)).resolves.toEqual({ ok: true, complete: true, missing: [], warnings: [] });
 
     const [headers, row] = rt.rows('SpinsLog');
     expect(Object.fromEntries(headers.map((h: string, i: number) => [h, row[i]]))).toEqual(payload);

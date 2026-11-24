@@ -17,7 +17,7 @@
  *
  * SECURITY: anything in a VITE_ variable is compiled into the JavaScript bundle
  * and can be read by anyone who can load the site. Never treat it as a secret.
- * See docs/CONSOLIDATION.md for the recommended setup.
+ * See docs/SECURITY.md for the recommended setup.
  */
 import type { RingName, RingSlice, RosterStudent, SettingRow, SpinLogRow, SpinsLogPayload } from './types';
 
@@ -29,7 +29,8 @@ export type ApiErrorKind =
   | 'not_found'
   | 'http'
   | 'bad_response'
-  | 'rejected';
+  | 'rejected'
+  | 'conflict';
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -241,8 +242,54 @@ export interface ApiClientOptions {
 
 export interface WriteResult {
   ok: true;
-  /** Non-fatal notes from the backend, for example a missing sheet column. */
+  /**
+   * Whether every field was stored.
+   * true: confirmed complete. false: stored, but some optional fields had no column.
+   * null: the backend is an older version that cannot say.
+   */
+  complete: boolean | null;
+  /** Fields that were not stored because the sheet has no column for them. */
+  missing: string[];
+  /** Non-fatal notes from the backend. */
   warnings: string[];
+}
+
+export interface HealthResult {
+  status: 'ok';
+  /** Non-fatal schema notes, for example an optional column that is absent. */
+  warnings: string[];
+  /** Backend contract version, or null for a backend that predates versioning. */
+  contract: number | null;
+}
+
+/** Sheet rows together with the untouched copy needed to detect a concurrent edit. */
+export interface SheetSnapshot<T> {
+  rows: T[];
+  /** The rows exactly as the backend returned them. Sent back as `base_rows` on save. */
+  base: unknown[];
+}
+
+export interface WriteOptions {
+  adminToken?: string;
+  /** Rows as originally read. When given, the backend refuses the write if the sheet changed since. */
+  base?: unknown[];
+}
+
+const asTextList = (value: unknown): string[] => (Array.isArray(value) ? value.map((v) => asText(v)).filter(Boolean) : []);
+
+/** True when two reads of a sheet hold the same rows, ignoring key order. */
+export function sameRows(a: unknown[], b: unknown[]): boolean {
+  const canonical = (rows: unknown[]) =>
+    JSON.stringify(
+      rows.map((row) =>
+        row && typeof row === 'object'
+          ? Object.keys(row as Record<string, unknown>)
+              .sort()
+              .map((key) => [key, (row as Record<string, unknown>)[key]])
+          : row
+      )
+    );
+  return canonical(a) === canonical(b);
 }
 
 const stripHtml = (text: string): string => text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -303,34 +350,68 @@ export function createApiClient({ url, token, fetchImpl, timeoutMs = 20000 }: Ap
   /** A write only counts when the backend says `ok: true`. Anything else is a failure. */
   async function write(body: Record<string, unknown>, what: string): Promise<WriteResult> {
     const data = await post(body);
-    if (data && typeof data === 'object' && (data as { ok?: unknown }).ok === true) {
-      const warnings = (data as { warnings?: unknown }).warnings;
-      return { ok: true, warnings: Array.isArray(warnings) ? warnings.map((w) => asText(w)) : [] };
+    const fields = data && typeof data === 'object' && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+    if (fields.ok === true) {
+      const missing = asTextList(fields.missing_optional);
+      // Only an explicit `complete: true` counts as complete. A backend that lists
+      // missing fields without the flag is still treated as incomplete.
+      const complete = fields.complete === true && missing.length === 0 ? true : fields.complete === false || missing.length > 0 ? false : null;
+      return { ok: true, complete, missing, warnings: asTextList(fields.warnings) };
     }
-    const reason = data && typeof data === 'object' ? asText((data as { error?: unknown }).error) : '';
+    const reason = asText(fields.error);
+    if (fields.conflict === true) {
+      throw new ApiError('conflict', reason || 'The sheet was changed by someone else after it was loaded. Nothing was saved.');
+    }
     throw new ApiError('rejected', `The backend did not confirm ${what}${reason ? `: ${reason}` : '.'}`);
   }
 
+  const writeBody = (type: string, rows: unknown[], options: WriteOptions = {}): Record<string, unknown> => ({
+    type,
+    rows,
+    ...(options.adminToken ? { admin_token: options.adminToken } : {}),
+    ...(options.base ? { base_rows: options.base } : {}),
+  });
+
   return {
-    async health(): Promise<{ status: 'ok' }> {
+    async health(): Promise<HealthResult> {
       const data = await get('health');
-      if (!data || typeof data !== 'object' || (data as { status?: unknown }).status !== 'ok') {
-        const missing = data && typeof data === 'object' ? (data as { missing?: unknown }).missing : undefined;
-        const detail = Array.isArray(missing) && missing.length > 0 ? ` Missing sheet tabs: ${missing.map((m) => asText(m)).join(', ')}.` : '';
-        throw new ApiError('bad_response', `The backend health check did not return status "ok".${detail}`);
+      const fields = data && typeof data === 'object' && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+      if (fields.status !== 'ok') {
+        const details = [
+          asTextList(fields.missing).length > 0 ? `Missing sheet tabs: ${asTextList(fields.missing).join(', ')}.` : '',
+          ...asTextList(fields.problems).map((problem) => `${problem}.`),
+        ].filter(Boolean);
+        throw new ApiError(
+          'bad_response',
+          `The backend health check did not return status "ok".${details.length > 0 ? ` ${details.join(' ')}` : ''}`
+        );
       }
-      return { status: 'ok' };
+      return {
+        status: 'ok',
+        warnings: asTextList(fields.warnings),
+        contract: typeof fields.contract === 'number' ? fields.contract : null,
+      };
     },
     roster: async () => normalizeRoster(await get('roster')),
     rings: async () => normalizeRings(await get('rings')),
     settings: async () => normalizeSettings(await get('settings')),
+    /** Rings for editing: the rows plus the untouched copy used to detect concurrent edits. */
+    async readRings(): Promise<SheetSnapshot<RingSlice>> {
+      const base = await get('rings');
+      return { rows: normalizeRings(base), base: base as unknown[] };
+    },
+    /** Settings for editing: the rows plus the untouched copy used to detect concurrent edits. */
+    async readSettings(): Promise<SheetSnapshot<SettingRow>> {
+      const base = await get('settings');
+      return { rows: normalizeSettings(base), base: base as unknown[] };
+    },
     getSpins: async (filters: { date?: string; period?: string; email?: string }) =>
       normalizeSpins(await post({ mode: 'getSpins', ...filters })),
     logSpin: (payload: SpinsLogPayload) => write({ type: 'logspin', payload }, 'the spin was logged'),
-    writeRings: (rows: RingSlice[], adminToken?: string) =>
-      write({ type: 'writerings', rows, ...(adminToken ? { admin_token: adminToken } : {}) }, 'the ring weights were saved'),
-    writeSettings: (rows: SettingRow[], adminToken?: string) =>
-      write({ type: 'writesettings', rows, ...(adminToken ? { admin_token: adminToken } : {}) }, 'the settings were saved'),
+    writeRings: (rows: RingSlice[], options?: WriteOptions) =>
+      write(writeBody('writerings', rows, options), 'the ring weights were saved'),
+    writeSettings: (rows: SettingRow[], options?: WriteOptions) =>
+      write(writeBody('writesettings', rows, options), 'the settings were saved'),
   };
 }
 
@@ -353,8 +434,10 @@ export const api: ApiClient = {
   roster: async () => currentClient().roster(),
   rings: async () => currentClient().rings(),
   settings: async () => currentClient().settings(),
+  readRings: async () => currentClient().readRings(),
+  readSettings: async () => currentClient().readSettings(),
   getSpins: async (filters) => currentClient().getSpins(filters),
   logSpin: async (payload) => currentClient().logSpin(payload),
-  writeRings: async (rows, adminToken) => currentClient().writeRings(rows, adminToken),
-  writeSettings: async (rows, adminToken) => currentClient().writeSettings(rows, adminToken),
+  writeRings: async (rows, options) => currentClient().writeRings(rows, options),
+  writeSettings: async (rows, options) => currentClient().writeSettings(rows, options),
 };

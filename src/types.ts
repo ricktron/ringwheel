@@ -101,8 +101,13 @@ export interface Settings {
   enableAudio: boolean;
   enableConfetti: boolean;
   enablePlantaeMercy: boolean;
-  /** Region|Taxon pair cap, percent of session spins. */
+  /** Region|Taxon pair cap, percent of session spins, as written in the Settings sheet. */
   pairCapPercent: number;
+  /**
+   * When true, spins use `pairCapPercent`. When false (the default) spins use
+   * the fixed 12% the app has always used, whatever the sheet says.
+   */
+  usePairCapSetting: boolean;
   /** Milliseconds between tick sounds while the wheel spins. */
   tickerSpeed: number;
   /** Show the in-app auto test harness outside of dev builds. */

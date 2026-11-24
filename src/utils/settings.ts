@@ -9,7 +9,19 @@ export const DEFAULT_SETTINGS: Settings = {
   tickerSpeed: 100,
   enableTestHarness: false,
   applyRingWeights: false,
+  usePairCapSetting: false,
 };
+
+/**
+ * The pair cap spins actually use.
+ *
+ * The app has always capped pairs at a fixed 12% and ignored the value in the
+ * Settings sheet. Honoring the sheet value changes which results can come up,
+ * so it stays off until the teacher turns on `usePairCapSetting`.
+ */
+export function effectivePairCapPct(settings: Settings): number {
+  return settings.usePairCapSetting ? settings.pairCapPercent : DEFAULT_PAIR_CAP_PCT;
+}
 
 /** The documented sheet key for the pair cap, plus the legacy key the admin page used to write. */
 const PAIR_CAP_KEYS = ['midterm_pair_cap_pct', 'pairCapPercent'] as const;
@@ -20,6 +32,7 @@ const BOOLEAN_KEYS = [
   'enablePlantaeMercy',
   'enableTestHarness',
   'applyRingWeights',
+  'usePairCapSetting',
 ] as const;
 
 const TICKER_MIN = 50;
@@ -57,7 +70,8 @@ export function parseSettings(rows: SettingRow[]): { settings: Settings; warning
   if (capKey) {
     const cap = normalizePairCapPct(byKey.get(capKey));
     settings.pairCapPercent = cap.value;
-    if (!cap.valid) {
+    // Only worth a warning when the value is actually in use.
+    if (!cap.valid && settings.usePairCapSetting) {
       warnings.push(
         `Setting "${capKey}" has the value "${byKey.get(capKey)}". The pair cap must be above 0 and at most 100. Using ${DEFAULT_PAIR_CAP_PCT}.`
       );

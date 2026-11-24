@@ -10,6 +10,10 @@
  * Environment:
  *   PW_CHROMIUM_PATH   optional path to a Chromium binary (otherwise Playwright's own)
  *   E2E_SCREENSHOTS=1  also write screenshots to e2e/artifacts/
+ *   RINGWHEEL_GAS_PATH + E2E_LEGACY_BACKEND=1
+ *                      run against an older copy of the backend source, to check the
+ *                      frontend still works before the backend is redeployed. Steps that
+ *                      need the current backend are skipped and reported as SKIP.
  */
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
@@ -21,6 +25,9 @@ import { startMockServer } from './mock-server.mjs';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ARTIFACTS = fileURLToPath(new URL('./artifacts/', import.meta.url));
 const SCREENSHOTS = process.env.E2E_SCREENSHOTS === '1';
+const LEGACY_BACKEND = process.env.E2E_LEGACY_BACKEND === '1';
+/** What a successful save looks like. An older backend cannot confirm completeness. */
+const SAVED = LEGACY_BACKEND ? 'unverified' : 'logged';
 if (SCREENSHOTS) mkdirSync(ARTIFACTS, { recursive: true });
 
 const REGIONS = ['Palearctic', 'Nearctic', 'Neotropical', 'Afrotropical', 'Indomalayan', 'Australasian', 'Antarctic', 'Oceanic'];
@@ -29,6 +36,17 @@ const IUCN = ['LC', 'NT', 'VU', 'EN', 'CR', 'EW', 'EX'];
 
 const results = [];
 let failures = 0;
+let skipped = 0;
+
+/** A step that only makes sense against the current backend source. */
+async function currentBackendStep(name, fn) {
+  if (LEGACY_BACKEND) {
+    skipped++;
+    results.push(`SKIP  ${name} (needs the current backend)`);
+    return;
+  }
+  await step(name, fn);
+}
 
 async function step(name, fn) {
   try {
@@ -159,6 +177,11 @@ await step('spin page loads, backend reports connected, no result is shown befor
   assert.equal(await page.getByTestId('api-not-configured').count(), 0);
   await page.getByTestId('ring-wheel').waitFor();
   assert.match(await text(page, 'result-empty'), /No spin yet/);
+  if (LEGACY_BACKEND) {
+    assert.match(await page.getByTestId('api-note').first().innerText(), /Older backend version/);
+  } else {
+    assert.equal(await page.getByTestId('api-note').count(), 0);
+  }
   await shot(page, '01-spin-initial');
 });
 
@@ -181,7 +204,7 @@ await step('a spin picks a legal result, shows the student, and is confirmed as 
   assert.ok(REGIONS.includes(first.region), `unexpected region ${first.region}`);
   assert.ok(TAXA.includes(first.taxon) && first.taxon !== 'Plantae', `unexpected taxon ${first.taxon}`);
   assert.ok(IUCN.includes(first.iucn), `unexpected IUCN ${first.iucn}`);
-  await waitForLogStatus(page, 'logged');
+  await waitForLogStatus(page, SAVED);
   await shot(page, '02-after-spin');
 });
 
@@ -227,7 +250,7 @@ await step('veto re-spins only the chosen ring and logs it as a veto', async () 
   assert.equal(afterVeto.iucn, first.iucn, 'IUCN changed during a taxon veto');
   assert.notEqual(afterVeto.taxon, first.taxon, 'taxon did not change');
   assert.notEqual(afterVeto.taxon, 'Plantae');
-  await waitForLogStatus(page, 'logged');
+  await waitForLogStatus(page, SAVED);
   const row = logRows(mock)[1];
   assert.equal(row.veto_used, true);
   assert.equal(row.student_name, 'Ada Sample');
@@ -251,7 +274,7 @@ await step('Plantae Mercy sets Plantae with the chosen region, keeps IUCN, and i
   assert.equal(mercy.taxon, 'Plantae');
   assert.equal(mercy.region, 'Neotropical');
   assert.equal(mercy.iucn, afterVeto.iucn);
-  await waitForLogStatus(page, 'logged');
+  await waitForLogStatus(page, SAVED);
   const row = logRows(mock)[2];
   assert.equal(row.plantae_mercy, true);
   assert.equal(row.veto_used, false);
@@ -277,7 +300,7 @@ await step('a failed log write is shown as NOT SAVED, never as success, and can 
 
   mock.state.failLogSpin = false;
   await panel.getByRole('button', { name: 'Retry saving' }).click();
-  await waitForLogStatus(page, 'logged');
+  await waitForLogStatus(page, SAVED);
   const rows = logRows(mock);
   assert.equal(rows.length, count + 1);
   assert.equal(rows[rows.length - 1].student_name, 'Ben Placeholder');
@@ -289,7 +312,7 @@ await step('the queue advances after each student and reports when everyone has 
   await page.getByRole('button', { name: 'Next Spinner' }).click();
   assert.match(await text(page, 'current-student'), /Cy Demo/);
   await spinOnce(page);
-  await waitForLogStatus(page, 'logged');
+  await waitForLogStatus(page, SAVED);
   await page.getByRole('button', { name: 'Next Spinner' }).click();
   assert.match(await text(page, 'queue-status'), /All students in this queue have spun/);
 });
@@ -307,6 +330,94 @@ await step('the spin button works from the keyboard', async () => {
   await page.keyboard.press('Enter');
   await page.waitForFunction((prev) => document.querySelector('[data-testid="debug-payload"]')?.textContent !== prev, before);
   await readResult(page);
+});
+
+/**
+ * Replace the fake SpinsLog tab with a copy that lacks some columns, the way a
+ * hand-edited Sheet might. Returns a function that puts the full tab back and
+ * keeps any rows written in the meantime.
+ */
+function dropSpinsLogColumns(columns) {
+  const sheet = mock.runtime.sheet('SpinsLog');
+  const original = sheet.rows.map((r) => [...r]);
+  const fullHeaders = original[0];
+  const keep = fullHeaders.map((h, i) => (columns.includes(h) ? -1 : i)).filter((i) => i >= 0);
+  sheet.rows = original.map((r) => keep.map((i) => r[i]));
+  return () => {
+    const reducedHeaders = sheet.rows[0];
+    const added = sheet.rows.slice(original.length).map((r) => fullHeaders.map((h) => {
+      const at = reducedHeaders.indexOf(h);
+      return at === -1 ? '' : r[at];
+    }));
+    sheet.rows = [...original, ...added];
+    return added;
+  };
+}
+
+await currentBackendStep('a spin into a log sheet missing optional columns is shown as INCOMPLETE, never as saved', async () => {
+  const restore = dropSpinsLogColumns(['seed', 'session_id']);
+  try {
+    // The health check warns before any spin is made.
+    const probe = await context.newPage();
+    await probe.goto(`${app.url}/spin`);
+    await probe.locator('[data-testid="api-status"][data-status="ok"]').waitFor({ timeout: 10000 });
+    assert.match(await probe.getByTestId('api-note').innerText(), /SpinsLog has no column for: session_id, seed/);
+    await probe.close();
+
+    const result = await spinOnce(page);
+    await waitForLogStatus(page, 'partial');
+    const panel = page.locator('section[aria-labelledby="result-heading"]');
+    const panelText = await panel.innerText();
+    assert.match(panelText, /Saved INCOMPLETE/);
+    assert.doesNotMatch(panelText, /Saved to the log/);
+    assert.match(await text(page, 'log-partial'), /Not stored: session_id, seed\./);
+    assert.equal(await panel.getByRole('alert').count(), 1);
+    assert.match(await text(page, 'incomplete-count'), /1 incomplete/);
+    assert.equal(await page.getByTestId('unsaved-count').count(), 0);
+    await shot(page, '04b-log-incomplete');
+
+    // The row exists and holds everything the sheet had a column for.
+    const [headers, ...rows] = mock.runtime.rows('SpinsLog');
+    assert.ok(!headers.includes('seed') && !headers.includes('session_id'));
+    const last = rows[rows.length - 1];
+    assert.equal(last.length, headers.length);
+    assert.equal(last[headers.indexOf('result_A')], result.region);
+    assert.equal(last[headers.indexOf('is_test')], false);
+  } finally {
+    restore();
+  }
+});
+
+await currentBackendStep('a spin into a log sheet missing a required column is NOT SAVED and writes no partial row', async () => {
+  const restore = dropSpinsLogColumns(['email']);
+  const before = mock.runtime.rows('SpinsLog').length;
+  let restored = false;
+  try {
+    // The health check fails before any spin is made.
+    const probe = await context.newPage();
+    await probe.goto(`${app.url}/spin`);
+    await probe.locator('[data-testid="api-status"][data-status="error"]').waitFor({ timeout: 10000 });
+    assert.match(await probe.getByTestId('api-status').innerText(), /SpinsLog is missing required columns: email/);
+    await probe.close();
+
+    const result = await spinOnce(page);
+    await waitForLogStatus(page, 'failed');
+    const panel = page.locator('section[aria-labelledby="result-heading"]');
+    assert.match(await panel.innerText(), /NOT SAVED to the log/);
+    assert.match(await text(page, 'log-error'), /Nothing was logged\. The SpinsLog sheet is missing required columns: email\./);
+    assert.equal(mock.runtime.rows('SpinsLog').length, before, 'a partial row was written');
+
+    // Once the column is back, the same spin can be saved in full.
+    restore();
+    restored = true;
+    await panel.getByRole('button', { name: 'Retry saving' }).click();
+    await waitForLogStatus(page, 'logged');
+    const rows = logRows(mock);
+    assert.equal(rows[rows.length - 1].result_A, result.region);
+    assert.match(String(rows[rows.length - 1].seed), /^[0-9a-f]{16}$/);
+  } finally {
+    if (!restored) restore();
+  }
 });
 
 await step('the auto test harness passes and writes nothing to the sheet by default', async () => {
@@ -400,6 +511,9 @@ await step('saving settings keeps unrelated rows, notes and the documented pair 
   assert.deepEqual(byKey.mode, ['mode', 'midterm', 'midterm or final']);
   assert.equal(String(byKey.enableAudio[1]), 'false');
   assert.equal(byKey.enableAudio[2], 'Sheets stores this as a real boolean');
+  // The value is stored, but the page says it is not in use: spins keep the historical 12%.
+  assert.match(await text(page, 'pair-cap-inactive'), /Not in use\. Spins use the fixed 12% cap/);
+  assert.equal(byKey.usePairCapSetting, undefined);
   await shot(page, '06-admin');
 });
 
@@ -416,6 +530,45 @@ await step('saving weights changes only the weight column and loses no rows', as
     if (expected[1] === 'Nearctic') expected[3] = 3;
     assert.deepEqual(after[i], expected);
   }
+});
+
+await step('an admin save is refused, with nothing lost, when the Sheet changed after the page loaded', async () => {
+  await page.goto(`${app.url}/admin`);
+  await page.locator('[data-testid="save-settings"]:not([disabled])').waitFor({ timeout: 10000 });
+
+  // Meanwhile a colleague adds a row and edits a value directly in the Sheet.
+  const sheet = mock.runtime.sheet('Settings');
+  sheet.rows.push(['added_in_sheets', 'yes', 'by a colleague']);
+  const modeRow = sheet.rows.find((r) => r[0] === 'mode');
+  modeRow[1] = 'final';
+  const afterEdit = JSON.stringify(mock.runtime.rows('Settings'));
+  const writesBefore = mock.state.requests.filter((r) => r.type === 'writesettings').length;
+
+  await page.getByLabel('Confetti', { exact: true }).check();
+  await page.getByTestId('save-settings').click();
+  const notice = page.getByTestId('admin-notice');
+  await notice.getByText(/Settings were NOT saved/).waitFor();
+  assert.match(await notice.innerText(), /changed by someone else after this page loaded it \(changed: mode; added: added_in_sheets\)/);
+  assert.equal(JSON.stringify(mock.runtime.rows('Settings')), afterEdit, 'the sheet was modified by a refused save');
+  assert.equal(mock.state.requests.filter((r) => r.type === 'writesettings').length, writesBefore, 'a write was sent');
+  await shot(page, '06b-admin-conflict');
+
+  // Reload, redo the edit: now both people's changes are in the sheet.
+  await page.getByTestId('reload-after-conflict').click();
+  await page.locator('[data-testid="save-settings"]:not([disabled])').waitFor();
+  assert.equal(await page.getByTestId('admin-notice').count(), 0);
+  await page.getByLabel('Confetti', { exact: true }).check();
+  await page.getByTestId('save-settings').click();
+  await page.getByText('Settings saved to the sheet.').waitFor();
+  const rows = mock.runtime.rows('Settings');
+  assert.deepEqual(rows.find((r) => r[0] === 'added_in_sheets'), ['added_in_sheets', 'yes', 'by a colleague']);
+  assert.deepEqual(rows.find((r) => r[0] === 'mode'), ['mode', 'final', 'midterm or final']);
+  assert.equal(String(rows.find((r) => r[0] === 'enableConfetti')[1]), 'true');
+
+  // Put the synthetic sheet back the way the following steps expect it.
+  await page.getByLabel('Confetti', { exact: true }).uncheck();
+  await page.getByTestId('save-settings').click();
+  await page.getByText('Settings saved to the sheet.').waitFor();
 });
 
 await step('a weight that would leave a ring with nothing to land on is refused', async () => {
@@ -456,21 +609,43 @@ await step('weights only affect spins once "Apply ring weights" is on, and the s
   await shot(page, '07-weighted');
 });
 
-await step('when the rules leave no legal outcome the page says so and logs nothing', async () => {
-  // One region, four taxa and a 20% cap: after 4 spins every pair sits at 25% and is capped.
-  let error = 0;
-  for (let i = 0; i < 12 && !error; i++) {
+/** Spin until the pair cap runs dry and return the message shown. Fails if a spin is logged without being made. */
+async function spinUntilExhausted() {
+  for (let i = 0; i < 12; i++) {
     const before = logRows(mock).length;
     await page.getByTestId('spin-button').click();
     await page.waitForTimeout(700);
-    error = await page.getByTestId('spin-error').count();
-    if (error) {
-      assert.match(await text(page, 'spin-error'), /No spin was made.*pair cap leaves no Region and Taxon combination/s);
+    if (await page.getByTestId('spin-error').count()) {
       assert.equal(logRows(mock).length, before, 'a spin was logged although none was made');
+      return text(page, 'spin-error');
     }
   }
-  assert.equal(error, 1, 'the pair cap never ran out, so the exhausted state was not exercised');
+  assert.fail('the pair cap never ran out, so the exhausted state was not exercised');
+}
+
+await step('when the rules leave no legal outcome the page says so and logs nothing', async () => {
+  // One region and four taxa: after 4 spins every pair sits at 25% and is capped.
+  const message = await spinUntilExhausted();
+  assert.match(message, /No spin was made.*pair cap leaves no Region and Taxon combination/s);
   await shot(page, '08-exhausted');
+});
+
+await step('the pair cap stays at the historical 12% until the teacher turns the sheet value on', async () => {
+  // The Settings sheet says 20 (saved earlier), but the switch is off.
+  assert.equal(String(mock.runtime.rows('Settings').find((r) => r[0] === 'midterm_pair_cap_pct')[1]), '20');
+  assert.match(await text(page, 'spin-error'), /The 12% pair cap/);
+
+  await page.goto(`${app.url}/admin`);
+  await page.locator('[data-testid="save-settings"]:not([disabled])').waitFor();
+  await page.getByRole('checkbox', { name: /^Use the pair cap value below/ }).check();
+  await page.getByTestId('save-settings').click();
+  await page.getByText('Settings saved to the sheet.').waitFor();
+  assert.equal(await page.getByTestId('pair-cap-inactive').count(), 0);
+  assert.equal(String(mock.runtime.rows('Settings').find((r) => r[0] === 'usePairCapSetting')[1]), 'true');
+
+  await page.goto(`${app.url}/spin`);
+  await page.getByTestId('weighted-notice').waitFor({ timeout: 10000 });
+  assert.match(await spinUntilExhausted(), /The 20% pair cap/);
 });
 
 await step('a rejected token is reported plainly and blocks admin saves', async () => {
@@ -518,6 +693,18 @@ await step('without configuration the page says spins are not being saved', asyn
   await page2.locator('[data-testid="api-status"][data-status="unconfigured"]').waitFor();
 });
 
+await step('Plantae Mercy before any spin records LC with no seed, as it did before consolidation', async () => {
+  await page2.getByTestId('mercy-button').click();
+  await page2.getByRole('dialog', { name: 'Plantae Mercy' }).getByRole('button', { name: 'Nearctic' }).click();
+  const mercy = await readResult(page2);
+  assert.deepEqual([mercy.region, mercy.taxon, mercy.iucn], ['Nearctic', 'Plantae', 'LC']);
+  await page2.locator('details summary').click();
+  const payload = JSON.parse(await page2.getByTestId('debug-payload').innerText());
+  assert.equal(payload.seed, '');
+  assert.equal(payload.plantae_mercy, true);
+  assert.deepEqual(JSON.parse(payload.rule_flags_json), ['plantae_mercy', 'wildcard_iucn']);
+});
+
 await step('a local-only spin (full-length animation) is clearly marked as not saved', async () => {
   const requestsBefore = mock.state.requests.length;
   const started = Date.now();
@@ -550,5 +737,5 @@ await browser.close();
 await mock.close();
 
 console.log(results.join('\n'));
-console.log(`\n${results.length - failures} passed, ${failures} failed`);
+console.log(`\n${results.length - failures - skipped} passed, ${failures} failed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(failures === 0 ? 0 : 1);

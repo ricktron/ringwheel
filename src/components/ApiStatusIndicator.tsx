@@ -18,14 +18,22 @@ export const ApiStatusIndicator = () => {
   const configured = getApiConfig().problems.length === 0;
   const [status, setStatus] = useState<ApiStatus>(configured ? 'checking' : 'unconfigured');
   const [detail, setDetail] = useState('');
+  const [notes, setNotes] = useState<string[]>([]);
 
   useEffect(() => {
     if (!configured) return;
     let cancelled = false;
     api
       .health()
-      .then(() => {
-        if (!cancelled) setStatus('ok');
+      .then((health) => {
+        if (cancelled) return;
+        setStatus('ok');
+        setNotes([
+          ...(health.contract === null
+            ? ['Older backend version: it cannot confirm that every field of a spin was stored.']
+            : []),
+          ...health.warnings,
+        ]);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -49,6 +57,12 @@ export const ApiStatusIndicator = () => {
         {style.label}
       </span>
       {status === 'error' && detail && <span className="max-w-xs text-right text-xs text-bad">{detail}</span>}
+      {status === 'ok' &&
+        notes.map((note) => (
+          <span key={note} className="max-w-xs text-right text-xs text-sun" data-testid="api-note">
+            {note}
+          </span>
+        ))}
     </div>
   );
 };

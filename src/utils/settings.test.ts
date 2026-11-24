@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SettingRow } from '../types';
-import { DEFAULT_SETTINGS, mergeSettingsRows, parseSettings } from './settings';
+import { DEFAULT_SETTINGS, effectivePairCapPct, mergeSettingsRows, parseSettings } from './settings';
 
 const row = (key: string, value: string, notes = ''): SettingRow => ({ key, value, notes });
 
@@ -27,9 +27,30 @@ describe('parseSettings', () => {
       enablePlantaeMercy: false,
       applyRingWeights: true,
       enableTestHarness: true,
+      usePairCapSetting: false,
       pairCapPercent: 20,
       tickerSpeed: 250,
     });
+  });
+
+  it('keeps the historical fixed 12% pair cap unless the teacher turns the sheet value on', () => {
+    // Before consolidation the cap was always 12 and the sheet value was ignored.
+    const off = parseSettings([row('midterm_pair_cap_pct', '30')]).settings;
+    expect(off.pairCapPercent).toBe(30);
+    expect(off.usePairCapSetting).toBe(false);
+    expect(effectivePairCapPct(off)).toBe(12);
+
+    const on = parseSettings([row('midterm_pair_cap_pct', '30'), row('usePairCapSetting', 'true')]).settings;
+    expect(effectivePairCapPct(on)).toBe(30);
+
+    expect(effectivePairCapPct(DEFAULT_SETTINGS)).toBe(12);
+  });
+
+  it('only warns about a bad pair cap value when that value is in use', () => {
+    expect(parseSettings([row('midterm_pair_cap_pct', '0')]).warnings).toEqual([]);
+    const inUse = parseSettings([row('midterm_pair_cap_pct', '0'), row('usePairCapSetting', 'true')]);
+    expect(inUse.warnings.join(' ')).toMatch(/pair cap must be above 0/);
+    expect(effectivePairCapPct(inUse.settings)).toBe(12);
   });
 
   it('keeps weights off and the harness hidden unless the sheet says otherwise', () => {
@@ -47,6 +68,7 @@ describe('parseSettings', () => {
     const { settings, warnings } = parseSettings([
       row('enableAudio', 'maybe'),
       row('midterm_pair_cap_pct', '0'),
+      row('usePairCapSetting', 'true'),
       row('tickerSpeed', '5'),
     ]);
     expect(settings.enableAudio).toBe(DEFAULT_SETTINGS.enableAudio);

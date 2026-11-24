@@ -1,6 +1,14 @@
 import type { SpinOutcome } from '../utils/spin-engine';
 
-export type LogStatus = 'pending' | 'logged' | 'failed' | 'local_only';
+/**
+ * How far a spin got on its way into the SpinsLog sheet.
+ * - logged:     the backend confirmed every field was stored
+ * - unverified: stored, but the backend is an older version that cannot confirm every field
+ * - partial:    stored, but some fields had no column in the sheet
+ * - failed:     not stored
+ * - local_only: not stored because no backend is configured
+ */
+export type LogStatus = 'pending' | 'logged' | 'unverified' | 'partial' | 'failed' | 'local_only';
 
 export interface LogStatusBadgeProps {
   status: LogStatus;
@@ -11,6 +19,8 @@ export interface LogStatusBadgeProps {
 const STATUS_TEXT: Record<LogStatus, string> = {
   pending: 'Saving to the log…',
   logged: 'Saved to the log',
+  unverified: 'Saved (not confirmed complete)',
+  partial: 'Saved INCOMPLETE',
   failed: 'NOT SAVED to the log',
   local_only: 'NOT SAVED: backend not configured',
 };
@@ -18,6 +28,8 @@ const STATUS_TEXT: Record<LogStatus, string> = {
 const STATUS_STYLE: Record<LogStatus, string> = {
   pending: 'border-line text-ink-dim',
   logged: 'border-good text-good',
+  unverified: 'border-line text-ink',
+  partial: 'border-sun bg-sun/10 text-sun',
   failed: 'border-bad bg-bad/15 text-bad',
   local_only: 'border-sun bg-sun/10 text-sun',
 };
@@ -31,7 +43,9 @@ export function LogStatusBadge({ status, error }: LogStatusBadgeProps) {
       data-status={status}
       title={error}
     >
-      <span aria-hidden="true">{status === 'logged' ? '✓' : status === 'pending' ? '…' : '!'}</span>
+      <span aria-hidden="true">
+        {status === 'logged' || status === 'unverified' ? '✓' : status === 'pending' ? '…' : '!'}
+      </span>
       {STATUS_TEXT[status]}
     </span>
   );
@@ -67,7 +81,11 @@ export function ResultPanel({ outcome, studentName, spinning, logStatus, logErro
             No spin yet. Press SPIN to begin.
           </p>
         ) : (
-          <div className="result-pop space-y-3" key={`${outcome.seed}-${outcome.flags.join('|')}`} data-testid="result-ready">
+          <div
+            className="result-pop space-y-3"
+            key={`${outcome.seed}-${outcome.region}-${outcome.taxon}-${outcome.iucn}-${outcome.flags.join('|')}`}
+            data-testid="result-ready"
+          >
             <div className="rounded-xl bg-panel-raised/60 p-4">
               <p className="eyebrow">Student</p>
               <p className="text-3xl font-extrabold break-words" data-testid="result-student">
@@ -107,8 +125,22 @@ export function ResultPanel({ outcome, studentName, spinning, logStatus, logErro
       </div>
 
       {!spinning && outcome && logStatus && (
-        <div className="mt-4 space-y-2" role={logStatus === 'failed' || logStatus === 'local_only' ? 'alert' : undefined}>
+        <div
+          className="mt-4 space-y-2"
+          role={logStatus === 'failed' || logStatus === 'local_only' || logStatus === 'partial' ? 'alert' : undefined}
+        >
           <LogStatusBadge status={logStatus} error={logError} />
+          {logStatus === 'partial' && (
+            <p className="text-sm text-sun" data-testid="log-partial">
+              {logError ?? 'Some fields were not stored.'}
+            </p>
+          )}
+          {logStatus === 'unverified' && (
+            <p className="text-sm text-ink-dim" data-testid="log-unverified">
+              The deployed backend is an older version. It stored the spin but cannot confirm that every field has a
+              column in the sheet.
+            </p>
+          )}
           {logStatus === 'failed' && (
             <>
               <p className="text-sm text-bad" data-testid="log-error">

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, describeError, getApiConfig, isApiConfigured, saveBrowserApiConfig } from '../api';
+import { ApiError, api, describeError, getApiConfig, isApiConfigured, saveBrowserApiConfig, type SheetSnapshot } from '../api';
 import { ApiNotConfiguredBanner, ApiStatusIndicator } from '../components/ApiStatusIndicator';
 import type { RingSlice, SettingRow, Settings } from '../types';
 import { mergeRingWeights, ringWeightsFromRows, validateRingWeights, type RingWeights } from '../utils/rings';
 import { DEFAULT_SETTINGS, mergeSettingsRows, parseSettings } from '../utils/settings';
+import { saveGuarded } from '../utils/sheet-save';
 import { DEFAULT_RING_CONFIG, RING_KEYS, normalizePairCapPct, type RingKey } from '../utils/spin-engine';
 
 type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
@@ -21,18 +22,29 @@ const BOOLEAN_SETTINGS: { key: keyof Settings; label: string; hint?: string }[] 
     label: 'Apply ring weights to spins',
     hint: 'Off: every option is equally likely. On: spins follow the weights and active flags in the Rings sheet.',
   },
+  {
+    key: 'usePairCapSetting',
+    label: 'Use the pair cap value below',
+    hint: 'Off: spins use the fixed 12% cap the app has always used. On: spins use the value below.',
+  },
   { key: 'enableTestHarness', label: 'Show the auto test harness on the spin page' },
 ];
+
+const EMPTY_SNAPSHOT = { rows: [], base: [] };
 
 export const AdminPage = () => {
   const [loadState, setLoadState] = useState<LoadState>(isApiConfigured() ? 'loading' : 'idle');
   const [loadError, setLoadError] = useState('');
   const [notice, setNotice] = useState<Notice>(null);
   const [saving, setSaving] = useState(false);
+  /** True after a save was refused because the sheet changed underneath this page. */
+  const [conflict, setConflict] = useState(false);
 
-  // What the sheets held when they were loaded. Saves are merged into these.
-  const [settingsRows, setSettingsRows] = useState<SettingRow[]>([]);
-  const [ringRows, setRingRows] = useState<RingSlice[]>([]);
+  // What the sheets held when they were loaded. A save is refused if the sheet
+  // no longer matches, so another person's edit is never overwritten.
+  const [settingsSnap, setSettingsSnap] = useState<SheetSnapshot<SettingRow>>(EMPTY_SNAPSHOT);
+  const [ringsSnap, setRingsSnap] = useState<SheetSnapshot<RingSlice>>(EMPTY_SNAPSHOT);
+  const ringRows = ringsSnap.rows;
 
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [weights, setWeights] = useState<RingWeights>(() => ringWeightsFromRows([]));
@@ -48,12 +60,13 @@ export const AdminPage = () => {
       return;
     }
     setLoadState('loading');
-    Promise.all([api.settings(), api.rings()])
+    setConflict(false);
+    Promise.all([api.readSettings(), api.readRings()])
       .then(([loadedSettings, loadedRings]) => {
-        setSettingsRows(loadedSettings);
-        setRingRows(loadedRings);
-        setSettings(parseSettings(loadedSettings).settings);
-        setWeights(ringWeightsFromRows(loadedRings));
+        setSettingsSnap(loadedSettings);
+        setRingsSnap(loadedRings);
+        setSettings(parseSettings(loadedSettings.rows).settings);
+        setWeights(ringWeightsFromRows(loadedRings.rows));
         setLoadState('loaded');
       })
       .catch((err) => {
@@ -83,11 +96,19 @@ export const AdminPage = () => {
     setSaving(true);
     setNotice({ text: 'Saving settings…', isError: false });
     try {
-      const rows = mergeSettingsRows(settingsRows, settings);
-      await api.writeSettings(rows, adminToken || undefined);
-      setSettingsRows(rows);
+      const saved = await saveGuarded({
+        sheetName: 'Settings',
+        loaded: settingsSnap,
+        read: api.readSettings,
+        write: api.writeSettings,
+        buildRows: (current) => mergeSettingsRows(current, settings),
+        identify: (row) => String(row.key ?? ''),
+        adminToken: adminToken || undefined,
+      });
+      setSettingsSnap(saved);
       setNotice({ text: 'Settings saved to the sheet.', isError: false });
     } catch (err) {
+      setConflict(err instanceof ApiError && err.kind === 'conflict');
       setNotice({ text: `Settings were NOT saved. ${describeError(err)}`, isError: true });
     } finally {
       setSaving(false);
@@ -104,11 +125,19 @@ export const AdminPage = () => {
     setSaving(true);
     setNotice({ text: 'Saving weights…', isError: false });
     try {
-      const rows = mergeRingWeights(ringRows, weights);
-      await api.writeRings(rows, adminToken || undefined);
-      setRingRows(rows);
+      const saved = await saveGuarded({
+        sheetName: 'Rings',
+        loaded: ringsSnap,
+        read: api.readRings,
+        write: api.writeRings,
+        buildRows: (current) => mergeRingWeights(current, weights),
+        identify: (row) => `${String(row.ring_name ?? '')} ${String(row.label ?? '')}`.trim(),
+        adminToken: adminToken || undefined,
+      });
+      setRingsSnap(saved);
       setNotice({ text: 'Weights saved to the sheet.', isError: false });
     } catch (err) {
+      setConflict(err instanceof ApiError && err.kind === 'conflict');
       setNotice({ text: `Weights were NOT saved. ${describeError(err)}`, isError: true });
     } finally {
       setSaving(false);
@@ -175,6 +204,21 @@ export const AdminPage = () => {
           data-testid="admin-notice"
         >
           {notice.text}
+          {conflict && notice.isError && (
+            <div className="mt-3">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setNotice(null);
+                  load();
+                }}
+                data-testid="reload-after-conflict"
+              >
+                Reload current values
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -204,6 +248,11 @@ export const AdminPage = () => {
               <span className="block text-sm text-ink-dim">
                 A Region and Taxon pair cannot come up again while it makes up this share of the session's spins or more.
               </span>
+              {!settings.usePairCapSetting && (
+                <span className="block text-sm text-sun" data-testid="pair-cap-inactive">
+                  Not in use. Spins use the fixed 12% cap until "Use the pair cap value below" is turned on and saved.
+                </span>
+              )}
             </span>
             <input
               type="number"

@@ -319,27 +319,31 @@ export function vetoRespin({ seed, current, target, config = DEFAULT_RING_CONFIG
 }
 
 export interface MercyInput {
-  seed: string;
   /** The result on screen, if any. Its IUCN status is kept. */
   current: SpinTriple | null;
   /** Region chosen by the teacher. */
   region: Region;
-  config?: RingConfig;
 }
 
 /**
  * Plantae Mercy: the teacher assigns Plantae with a chosen region.
  * This is not a veto and does not count toward the pair cap.
- * The IUCN status is kept from the current result. Only when there is no
- * current result is one drawn, using the seed.
+ *
+ * Nothing here is random, so the outcome carries no seed.
+ *
+ * The IUCN status is kept from the current result. With no result yet it is
+ * the first status in the list (LC), which is what the app has always
+ * recorded in that case. The `wildcard_iucn` flag marks the status as open.
+ * Whether mercy should be allowed before any spin is a teacher decision
+ * (D6 in docs/CONSOLIDATION.md); until then the long-standing behavior stays.
  */
-export function plantaeMercy({ seed, current, region, config = DEFAULT_RING_CONFIG }: MercyInput): SpinOutcome {
-  const iucn = current ? current.iucn : weightedPick(requireEligible(config, 'iucn'), createRng(seed)).label;
+export function plantaeMercy({ current, region }: MercyInput): SpinOutcome {
+  const iucn = current ? current.iucn : IUCN_STATUS[0];
   return {
     region,
     taxon: MERCY_TAXON,
     iucn,
-    seed,
+    seed: '',
     flags: ['plantae_mercy', 'wildcard_iucn'],
     plantaeMercy: true,
     vetoUsed: false,

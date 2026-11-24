@@ -64,7 +64,7 @@ export function runAutoTestCase({ mode, seed, config, history, pairCapPct }: Aut
   if (mode === 'mercy') {
     const pick = Math.floor(createRng(`${seed}:mercy`)() * REGIONS.length);
     const region: Region = REGIONS[pick];
-    const outcome = plantaeMercy({ seed: `${seed}:mercy`, current: base, region, config });
+    const outcome = plantaeMercy({ current: base, region });
     if (outcome.taxon !== MERCY_TAXON) errors.push('Mercy did not set the taxon to Plantae.');
     if (outcome.region !== region) errors.push('Mercy did not use the chosen region.');
     if (outcome.iucn !== base.iucn) errors.push('Mercy changed the IUCN status.');

@@ -12,7 +12,7 @@ import { AudioService } from '../services/audio';
 import type { IUCN, Region, RingSlice, RosterStudent, Settings, SpinLogRow, SpinQueueItem, Taxon } from '../types';
 import { buildRingConfig } from '../utils/rings';
 import { buildQueue, periodsForSemester, type QueueOrder, type Semester } from '../utils/roster';
-import { DEFAULT_SETTINGS, parseSettings } from '../utils/settings';
+import { DEFAULT_SETTINGS, effectivePairCapPct, parseSettings } from '../utils/settings';
 import { buildSpinLogPayload } from '../utils/spin-log';
 import {
   IUCN_STATUS,
@@ -158,10 +158,18 @@ export const SpinPage = () => {
       api
         .logSpin(entry.payload)
         .then((result) => {
-          updateSessionSpin(entry.id, {
-            status: 'logged',
-            error: result.warnings.length > 0 ? result.warnings.join(' ') : undefined,
-          });
+          // "logged" is reserved for a write the backend confirmed as complete.
+          if (result.complete === true) {
+            updateSessionSpin(entry.id, { status: 'logged', error: undefined });
+          } else if (result.complete === false) {
+            const fields = result.missing.length > 0 ? result.missing.join(', ') : 'some fields';
+            updateSessionSpin(entry.id, {
+              status: 'partial',
+              error: `Not stored: ${fields}. The SpinsLog sheet has no column for them. The student and result were stored.`,
+            });
+          } else {
+            updateSessionSpin(entry.id, { status: 'unverified', error: undefined });
+          }
           fetchLoggedSpins();
         })
         .catch((err) => updateSessionSpin(entry.id, { status: 'failed', error: describeError(err) }));
@@ -248,7 +256,7 @@ export const SpinPage = () => {
           seed,
           config: ringSetup.config,
           history: pairHistory.current,
-          pairCapPct: settings.pairCapPercent,
+          pairCapPct: effectivePairCapPct(settings),
         });
       }
     } catch (err) {
@@ -287,7 +295,7 @@ export const SpinPage = () => {
     setShowRegionPicker(false);
     setSpinError(null);
     try {
-      const next = plantaeMercy({ seed: randomSeed(), current: outcome, region, config: ringSetup.config });
+      const next = plantaeMercy({ current: outcome, region });
       setWheelTarget(next);
       settle(next, currentStudent, false);
     } catch (err) {
@@ -646,7 +654,7 @@ export const SpinPage = () => {
       </section>
 
       {showHarness && (
-        <AutoTestPanel config={ringSetup.config} pairCapPct={settings.pairCapPercent} sessionId={sessionId} />
+        <AutoTestPanel config={ringSetup.config} pairCapPct={effectivePairCapPct(settings)} sessionId={sessionId} />
       )}
 
       <details className="panel text-sm">

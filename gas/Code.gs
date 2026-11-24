@@ -18,16 +18,24 @@
  * - POST: JSON body with `token` and `type` (or `mode`)
  *
  * GET types (lowercase):
- * - health   -> { status: "ok" }, or { status: "degraded", missing: [tab names] }
+ * - health   -> { status: "ok", contract: 2, warnings: [...] }
+ *               or { status: "degraded", contract: 2, missing: [tab names], problems: [...], warnings: [...] }
+ *               "ok" means every tab exists and has the columns the app cannot work without.
  * - roster   -> array of { email, first, last, class, s1Period, s2Period }
  * - rings    -> array of row objects from the Rings sheet
  * - settings -> array of row objects from the Settings sheet
  *
  * POST types (lowercase):
  * - getspins      -> array of spin rows for one date (default today), optional period / email filter
- * - logspin       -> append one row to SpinsLog          -> { ok: true }
+ * - logspin       -> append one row to SpinsLog
+ *                    -> { ok: true, complete: true }                       every field was stored
+ *                    -> { ok: true, complete: false, missing_optional }    stored, but the sheet has no column for some optional fields
+ *                    -> { ok: false, error, missing_required }             nothing stored: a required column is absent
  * - writerings    -> replace the Rings sheet contents    -> { ok: true }
  * - writesettings -> replace the Settings sheet contents -> { ok: true }
+ *                    Both accept `base_rows`: the rows exactly as the client read them. When sent,
+ *                    the write is refused with { ok: false, conflict: true } if the sheet has
+ *                    changed since, so somebody else's edit is never silently overwritten.
  * - email         -> MailApp.sendEmail(to, subject, text) to an allowed recipient
  *
  * Responses:
@@ -43,6 +51,28 @@ const SheetHeaders = {
   SETTINGS: ['key','value','notes'],
   SPINS_LOG: ['timestamp_iso','session_id','period','student_name','email','result_A','result_B','result_C','plantae_mercy','veto_used','seed','is_test','rule_flags_json']
 };
+
+/**
+ * Columns a tab must have for the app to work. Everything else in SheetHeaders
+ * is optional: useful, but its absence does not make a record wrong.
+ *
+ * SpinsLog: a row has to say when, who, which period and what was spun.
+ * Without those it is not a usable record, so the write is refused.
+ * The remaining columns (session_id, plantae_mercy, veto_used, seed, is_test,
+ * rule_flags_json) are extra detail. A row is still written without them, but
+ * it is reported as incomplete, never as fully saved.
+ * One exception: a test spin is only written when the is_test column exists,
+ * so a test row can never pass for a real one.
+ */
+const RequiredHeaders = {
+  ROSTER: ['email', 'first', 'last'],
+  RINGS: ['ring_name', 'label'],
+  SETTINGS: ['key', 'value'],
+  SPINS_LOG: ['timestamp_iso', 'period', 'student_name', 'email', 'result_A', 'result_B', 'result_C']
+};
+
+/** Bumped when the response shapes gain fields a client can rely on. */
+const CONTRACT_VERSION = 2;
 
 /** Most rows a single writerings / writesettings call may carry. */
 const MAX_WRITE_ROWS = 500;
@@ -107,10 +137,10 @@ function doPost(e) {
         return json(logSpin(openSpreadsheet(), body.payload));
       case 'writerings':
         if (!adminOk(body)) return forbidden();
-        return json(writeRows(openSpreadsheet(), 'Rings', body.rows));
+        return json(writeRows(openSpreadsheet(), 'Rings', body.rows, body.base_rows));
       case 'writesettings':
         if (!adminOk(body)) return forbidden();
-        return json(writeRows(openSpreadsheet(), 'Settings', body.rows));
+        return json(writeRows(openSpreadsheet(), 'Settings', body.rows, body.base_rows));
       case 'email':
         if (!adminOk(body)) return forbidden();
         return json(sendEmail(body));
@@ -123,17 +153,66 @@ function doPost(e) {
 }
 
 /**
- * Health check. Reports "ok" only when the spreadsheet opens and all four tabs
- * exist, so a green status means spins can actually be read and logged.
+ * Compare a tab's header row with what the app needs.
+ * A tab with no header row at all reports nothing missing only where the
+ * backend can create the header itself (SpinsLog).
+ */
+function missingColumns(sheet, required, all, canInitialize) {
+  const headers = headerRow(sheet);
+  if (headers.length === 0 && canInitialize) {
+    return { required: [], optional: [] };
+  }
+  const absent = function (name) { return headers.indexOf(name) === -1; };
+  return {
+    required: required.filter(absent),
+    optional: all.filter(function (name) { return required.indexOf(name) === -1; }).filter(absent)
+  };
+}
+
+/**
+ * Health check. Reports "ok" only when the spreadsheet opens, all four tabs
+ * exist, and each has the columns the app cannot work without, so a green
+ * status means spins can actually be read and logged in full.
  */
 function healthStatus(ss) {
-  const missing = ['Roster', 'Rings', 'Settings', 'SpinsLog'].filter(function (name) {
-    return !ss.getSheetByName(name);
+  const tabs = [
+    ['Roster', RequiredHeaders.ROSTER, SheetHeaders.ROSTER, false],
+    ['Rings', RequiredHeaders.RINGS, SheetHeaders.RINGS, false],
+    ['Settings', RequiredHeaders.SETTINGS, SheetHeaders.SETTINGS, false],
+    ['SpinsLog', RequiredHeaders.SPINS_LOG, SheetHeaders.SPINS_LOG, true]
+  ];
+  const missing = [];
+  const problems = [];
+  const warnings = [];
+
+  tabs.forEach(function (tab) {
+    const sheet = ss.getSheetByName(tab[0]);
+    if (!sheet) {
+      missing.push(tab[0]);
+      return;
+    }
+    const cols = missingColumns(sheet, tab[1], tab[2], tab[3]);
+    if (cols.required.length > 0) {
+      problems.push(tab[0] + ' is missing required columns: ' + cols.required.join(', '));
+    }
+    if (cols.optional.length > 0) {
+      warnings.push(tab[0] + ' has no column for: ' + cols.optional.join(', '));
+    }
   });
-  if (missing.length > 0) {
-    return { status: 'degraded', missing: missing };
+
+  // A roster with no period column cannot place anyone in a class.
+  const roster = ss.getSheetByName('Roster');
+  if (roster) {
+    const rosterHeaders = headerRow(roster);
+    if (rosterHeaders.indexOf('S1 Period') === -1 && rosterHeaders.indexOf('S2 Period') === -1) {
+      problems.push('Roster has neither an "S1 Period" nor an "S2 Period" column');
+    }
   }
-  return { status: 'ok' };
+
+  if (missing.length > 0 || problems.length > 0) {
+    return { status: 'degraded', contract: CONTRACT_VERSION, missing: missing, problems: problems, warnings: warnings };
+  }
+  return { status: 'ok', contract: CONTRACT_VERSION, warnings: warnings };
 }
 
 /**
@@ -325,7 +404,14 @@ function readSheet(ss, name) {
 
 /**
  * Append one spin to SpinsLog. The log is append-only: existing rows are never
- * touched. Returns { ok: false } when nothing was written.
+ * touched.
+ *
+ * The answer always says how much was stored:
+ * - { ok: true, complete: true }                    every field has a column and was written
+ * - { ok: true, complete: false, missing_optional } the row was written, optional fields were not
+ * - { ok: false, error, missing_required }          nothing was written
+ * A row that lacks a required column is never written, so the log cannot
+ * collect records that do not say who spun what.
  */
 function logSpin(ss, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -360,14 +446,36 @@ function logSpin(ss, payload) {
       sheet.appendRow(headers);
     }
 
-    const missing = SheetHeaders.SPINS_LOG.filter(function (name) { return headers.indexOf(name) === -1; });
+    const absent = function (name) { return headers.indexOf(name) === -1; };
+
+    const required = RequiredHeaders.SPINS_LOG.slice();
+    // A test spin must stay recognizable as a test.
+    if (toBool(row.is_test)) required.push('is_test');
+
+    const missingRequired = required.filter(absent);
+    if (missingRequired.length > 0) {
+      const refusal = fail(
+        'Nothing was logged. The SpinsLog sheet is missing required columns: ' + missingRequired.join(', ') + '.'
+      );
+      refusal.missing_required = missingRequired;
+      return refusal;
+    }
+
+    const missingOptional = SheetHeaders.SPINS_LOG.filter(function (name) {
+      return required.indexOf(name) === -1 && absent(name);
+    });
+
     sheet.appendRow(headers.map(function (name) { return safeCell(row[name]); }));
 
-    const result = { ok: true };
-    if (missing.length > 0) {
-      result.warnings = ['SpinsLog is missing these columns, so their values were not saved: ' + missing.join(', ')];
+    if (missingOptional.length > 0) {
+      return {
+        ok: true,
+        complete: false,
+        missing_optional: missingOptional,
+        warnings: ['The spin was logged without these fields because SpinsLog has no column for them: ' + missingOptional.join(', ')]
+      };
     }
-    return result;
+    return { ok: true, complete: true };
   } finally {
     lock.releaseLock();
   }
@@ -415,8 +523,11 @@ function validateRows(name, rows) {
  * - The new contents are written in one call over the old ones. The sheet is
  *   never cleared first, so a failure cannot leave it empty.
  * - Formatting and any extra columns the sheet already has are kept.
+ * - When the client sends `baseRows` (the rows exactly as it read them), the
+ *   write only happens if the sheet still holds those rows. If someone edited
+ *   the sheet in between, nothing is written and the answer says conflict.
  */
-function writeRows(ss, name, rows) {
+function writeRows(ss, name, rows, baseRows) {
   const problem = validateRows(name, rows);
   if (problem) {
     return fail(problem);
@@ -429,9 +540,21 @@ function writeRows(ss, name, rows) {
 
   const frozen = name === 'Rings' ? SheetHeaders.RINGS : SheetHeaders.SETTINGS;
 
+  if (baseRows !== undefined && baseRows !== null && !Array.isArray(baseRows)) {
+    return fail('base_rows must be a list.');
+  }
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
+    if (Array.isArray(baseRows) && canonicalRows(readSheet(ss, name)) !== canonicalRows(baseRows)) {
+      const conflict = fail(
+        'The ' + name + ' sheet was changed by someone else after it was loaded. Nothing was saved. Reload and try again.'
+      );
+      conflict.conflict = true;
+      return conflict;
+    }
+
     // Keep the sheet's own column order and extra columns. Add any required column that is missing.
     const existing = headerRow(sheet).filter(function (h) { return h !== ''; });
     const headers = existing.slice();
@@ -466,6 +589,17 @@ function writeRows(ss, name, rows) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Order-independent text form of sheet rows, used to tell whether a sheet
+ * still holds what a client read earlier. Goes through JSON so that dates and
+ * numbers compare the way they travel to and from the browser.
+ */
+function canonicalRows(rows) {
+  return JSON.stringify(JSON.parse(JSON.stringify(rows)).map(function (row) {
+    return Object.keys(row || {}).sort().map(function (key) { return [key, row[key]]; });
+  }));
 }
 
 /**

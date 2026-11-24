@@ -50,11 +50,13 @@ describe('buildSpinLogPayload', () => {
     expect(veto.plantae_mercy).toBe(false);
     expect(JSON.parse(veto.rule_flags_json)).toEqual(['veto_respin', 'veto_respin_iucn']);
 
-    const mercy = buildSpinLogPayload({ outcome: plantaeMercy({ seed: 'm', current: base, region: 'Oceanic' }), timestamp, sessionId: 's', student, isTest: false });
+    const mercy = buildSpinLogPayload({ outcome: plantaeMercy({ current: base, region: 'Oceanic' }), timestamp, sessionId: 's', student, isTest: false });
     expect(mercy.veto_used).toBe(false);
     expect(mercy.plantae_mercy).toBe(true);
     expect(mercy.result_B).toBe('Plantae');
     expect(JSON.parse(mercy.rule_flags_json)).toEqual(['plantae_mercy', 'wildcard_iucn']);
+    // Mercy is a teacher choice, not a random draw, so its row has no seed.
+    expect(mercy.seed).toBe('');
   });
 
   it('keeps test spins distinguishable from real ones in two ways', () => {

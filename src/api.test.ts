@@ -8,6 +8,7 @@ import {
   normalizeSettings,
   normalizeSpins,
   resolveApiConfig,
+  sameRows,
 } from './api';
 import type { SpinsLogPayload } from './types';
 
@@ -85,7 +86,7 @@ describe('request shape (must match gas/Code.gs and avoid CORS preflight)', () =
       (c: ReturnType<typeof createApiClient>) => c.settings(),
       (c: ReturnType<typeof createApiClient>) => c.getSpins({ date: '2026-11-24', period: 'A' }),
       (c: ReturnType<typeof createApiClient>) => c.writeRings([]),
-      (c: ReturnType<typeof createApiClient>) => c.writeSettings([], 'admin-secret'),
+      (c: ReturnType<typeof createApiClient>) => c.writeSettings([], { adminToken: 'admin-secret' }),
     ]) {
       const { client, calls } = clientFor('{"ok":true}');
       await call(client).catch(() => undefined);
@@ -102,11 +103,47 @@ describe('request shape (must match gas/Code.gs and avoid CORS preflight)', () =
 
 describe('failures are never reported as success', () => {
   it('logSpin resolves only when the backend says ok: true', async () => {
-    await expect(clientFor('{"ok":true}').client.logSpin(payload)).resolves.toEqual({ ok: true, warnings: [] });
-    await expect(clientFor('{"ok":true,"warnings":["missing column"]}').client.logSpin(payload)).resolves.toEqual({
+    await expect(clientFor('{"ok":true,"complete":true}').client.logSpin(payload)).resolves.toEqual({
       ok: true,
-      warnings: ['missing column'],
+      complete: true,
+      missing: [],
+      warnings: [],
     });
+  });
+
+  it('a save counts as complete only when the backend explicitly confirms it', async () => {
+    const result = (body: string) => clientFor(body).client.logSpin(payload);
+
+    // Confirmed complete.
+    expect((await result('{"ok":true,"complete":true}')).complete).toBe(true);
+
+    // Stored, but the sheet had no column for some fields.
+    expect(await result('{"ok":true,"complete":false,"missing_optional":["seed","session_id"],"warnings":["w"]}')).toEqual({
+      ok: true,
+      complete: false,
+      missing: ['seed', 'session_id'],
+      warnings: ['w'],
+    });
+
+    // An older backend says only ok: true. That is "stored", not "complete".
+    expect((await result('{"ok":true}')).complete).toBeNull();
+    expect((await result('{"ok":true,"warnings":["SpinsLog is missing these columns"]}')).complete).toBeNull();
+
+    // Contradictory or sloppy answers never round up to complete.
+    expect((await result('{"ok":true,"complete":true,"missing_optional":["seed"]}')).complete).toBe(false);
+    expect((await result('{"ok":true,"missing_optional":["seed"]}')).complete).toBe(false);
+    expect((await result('{"ok":true,"complete":"true"}')).complete).toBeNull();
+    expect((await result('{"ok":true,"complete":1}')).complete).toBeNull();
+  });
+
+  it('a refused write because of missing required columns is a failure that names them', async () => {
+    const err = await errorFrom(
+      clientFor(
+        '{"ok":false,"error":"Nothing was logged. The SpinsLog sheet is missing required columns: email, period.","missing_required":["email","period"]}'
+      ).client.logSpin(payload)
+    );
+    expect(err.kind).toBe('rejected');
+    expect(err.message).toMatch(/Nothing was logged.*missing required columns: email, period/);
   });
 
   it.each([
@@ -161,11 +198,54 @@ describe('failures are never reported as success', () => {
     expect((await errorFrom(clientFor('Forbidden').client.writeRings([]))).kind).toBe('forbidden');
   });
 
-  it('health passes only on status ok and names missing tabs', async () => {
-    await expect(clientFor('{"status":"ok"}').client.health()).resolves.toEqual({ status: 'ok' });
-    const err = await errorFrom(clientFor('{"status":"degraded","missing":["SpinsLog"]}').client.health());
+  it('health passes only on status ok and names missing tabs and columns', async () => {
+    // Older backend: no contract version.
+    await expect(clientFor('{"status":"ok"}').client.health()).resolves.toEqual({ status: 'ok', warnings: [], contract: null });
+    await expect(
+      clientFor('{"status":"ok","contract":2,"warnings":["SpinsLog has no column for: seed"]}').client.health()
+    ).resolves.toEqual({ status: 'ok', warnings: ['SpinsLog has no column for: seed'], contract: 2 });
+
+    const err = await errorFrom(
+      clientFor(
+        '{"status":"degraded","contract":2,"missing":["Rings"],"problems":["SpinsLog is missing required columns: email"],"warnings":[]}'
+      ).client.health()
+    );
     expect(err.kind).toBe('bad_response');
-    expect(err.message).toMatch(/Missing sheet tabs: SpinsLog/);
+    expect(err.message).toMatch(/Missing sheet tabs: Rings\./);
+    expect(err.message).toMatch(/SpinsLog is missing required columns: email\./);
+  });
+
+  it('a concurrent-edit refusal is its own error kind, and base rows are sent when provided', async () => {
+    const refused = clientFor('{"ok":false,"conflict":true,"error":"The Settings sheet was changed by someone else after it was loaded. Nothing was saved. Reload and try again."}');
+    const err = await errorFrom(refused.client.writeSettings([{ key: 'a', value: '1' }], { base: [{ key: 'a', value: 0 }] }));
+    expect(err.kind).toBe('conflict');
+    expect(err.message).toMatch(/changed by someone else/);
+    expect(JSON.parse(String(refused.calls[0].init.body))).toEqual({
+      type: 'writesettings',
+      rows: [{ key: 'a', value: '1' }],
+      base_rows: [{ key: 'a', value: 0 }],
+      token: TOKEN,
+    });
+
+    // Without a base nothing extra is sent, which is what older callers did.
+    const plain = clientFor('{"ok":true}');
+    await plain.client.writeRings([]);
+    expect(JSON.parse(String(plain.calls[0].init.body))).toEqual({ type: 'writerings', rows: [], token: TOKEN });
+  });
+
+  it('edit snapshots keep the untouched rows next to the normalized ones', async () => {
+    const raw = [{ key: 'enableAudio', value: true, notes: '' }, { key: 'midterm_pair_cap_pct', value: 12, notes: 'n' }];
+    const snap = await clientFor(JSON.stringify(raw)).client.readSettings();
+    expect(snap.base).toEqual(raw);
+    expect(snap.rows.map((r) => r.value)).toEqual(['true', '12']);
+  });
+
+  it('sameRows ignores key order and nothing else', () => {
+    expect(sameRows([{ a: 1, b: 'x' }], [{ b: 'x', a: 1 }])).toBe(true);
+    expect(sameRows([{ a: 1 }], [{ a: '1' }])).toBe(false);
+    expect(sameRows([{ a: 1 }], [{ a: 1 }, { a: 2 }])).toBe(false);
+    expect(sameRows([{ a: 1 }, { a: 2 }], [{ a: 2 }, { a: 1 }])).toBe(false);
+    expect(sameRows([], [])).toBe(true);
   });
 
   it('list reads reject when the backend returns something that is not a list', async () => {

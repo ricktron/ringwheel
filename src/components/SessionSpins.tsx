@@ -20,6 +20,7 @@ export interface SessionSpinsProps {
  */
 export function SessionSpins({ spins, onRetry }: SessionSpinsProps) {
   const unsaved = spins.filter((s) => s.status === 'failed' || s.status === 'local_only').length;
+  const incomplete = spins.filter((s) => s.status === 'partial').length;
 
   return (
     <section className="panel" aria-labelledby="session-heading">
@@ -27,11 +28,18 @@ export function SessionSpins({ spins, onRetry }: SessionSpinsProps) {
         <h2 id="session-heading" className="text-xl font-bold">
           This session
         </h2>
-        {unsaved > 0 && (
-          <span className="text-sm font-bold text-bad" data-testid="unsaved-count">
-            {unsaved} not saved
-          </span>
-        )}
+        <span className="flex gap-3">
+          {incomplete > 0 && (
+            <span className="text-sm font-bold text-sun" data-testid="incomplete-count">
+              {incomplete} incomplete
+            </span>
+          )}
+          {unsaved > 0 && (
+            <span className="text-sm font-bold text-bad" data-testid="unsaved-count">
+              {unsaved} not saved
+            </span>
+          )}
+        </span>
       </div>
 
       {spins.length === 0 ? (

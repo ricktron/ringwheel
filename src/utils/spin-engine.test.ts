@@ -74,7 +74,7 @@ describe('seeded randomness', () => {
     const spy = vi.spyOn(Math, 'random');
     const base = spin({ seed: 's1' });
     vetoRespin({ seed: 's2', current: base, target: 'region' });
-    plantaeMercy({ seed: 's3', current: null, region: 'Nearctic' });
+    plantaeMercy({ current: null, region: 'Nearctic' });
     shuffle([1, 2, 3, 4], createRng('s4'));
     expect(spy).not.toHaveBeenCalled();
   });
@@ -365,7 +365,7 @@ describe('veto re-spin', () => {
   });
 
   it('keeps a mercy result marked as mercy unless the taxon ring itself is re-spun', () => {
-    const mercy = plantaeMercy({ seed: 'm', current: spin({ seed: 'base' }), region: 'Oceanic' });
+    const mercy = plantaeMercy({ current: spin({ seed: 'base' }), region: 'Oceanic' });
 
     const regionVeto = vetoRespin({ seed: 'v1', current: mercy, target: 'region' });
     expect(regionVeto.taxon).toBe('Plantae');
@@ -384,7 +384,7 @@ describe('Plantae Mercy', () => {
     for (const seed of seeds(200, 'mercy')) {
       const current = spin({ seed: `${seed}-base` });
       for (const region of REGIONS) {
-        const next = plantaeMercy({ seed, current, region });
+        const next = plantaeMercy({ current, region });
         expect(next.region).toBe(region);
         expect(next.taxon).toBe('Plantae');
         expect(next.iucn).toBe(current.iucn);
@@ -395,14 +395,24 @@ describe('Plantae Mercy', () => {
     }
   });
 
-  it('draws an eligible IUCN status from the seed when there is no result yet', () => {
-    const config = configWith({ iucn: { LC: { weight: 0 } } });
-    const first = plantaeMercy({ seed: 'no-current', current: null, region: 'Nearctic', config });
-    expect(first).toEqual(plantaeMercy({ seed: 'no-current', current: null, region: 'Nearctic', config }));
-    for (const seed of seeds(500, 'mercy-null')) {
-      const next = plantaeMercy({ seed, current: null, region: 'Nearctic', config });
-      expect(IUCN_STATUS).toContain(next.iucn);
-      expect(next.iucn).not.toBe('LC');
+  it('involves no randomness, so it carries no seed', () => {
+    const current = spin({ seed: 'base' });
+    expect(plantaeMercy({ current, region: 'Oceanic' }).seed).toBe('');
+    expect(plantaeMercy({ current, region: 'Oceanic' })).toEqual(plantaeMercy({ current, region: 'Oceanic' }));
+  });
+
+  it('with no result yet records LC, exactly as the app did before consolidation (decision D6)', () => {
+    // This pins the long-standing behavior. Changing it needs teacher approval.
+    for (const region of REGIONS) {
+      expect(plantaeMercy({ current: null, region })).toEqual({
+        region,
+        taxon: 'Plantae',
+        iucn: 'LC',
+        seed: '',
+        flags: ['plantae_mercy', 'wildcard_iucn'],
+        plantaeMercy: true,
+        vetoUsed: false,
+      });
     }
   });
 });

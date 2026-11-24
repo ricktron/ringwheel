@@ -1,5 +1,6 @@
 key,value,notes
-midterm_pair_cap_pct,12,"Pair cap. A Region and Taxon pair is not allowed while it makes up this percent or more of the session's spins. Above 0, at most 100."
+midterm_pair_cap_pct,12,"Pair cap value. Only used when usePairCapSetting is true. Above 0, at most 100."
+usePairCapSetting,false,"false: spins use the fixed 12% pair cap the app has always used. true: spins use midterm_pair_cap_pct."
 mode,midterm,Reserved. Not read by the app.
 enableAudio,true,Sound effects on or off.
 enableConfetti,true,Confetti on or off.
