@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import confetti from 'canvas-confetti';
-import { api, describeError, isApiConfigured } from '../api';
+import { describeError, isApiConfigured } from '../api';
 import { ApiNotConfiguredBanner, ApiStatusIndicator } from '../components/ApiStatusIndicator';
 import { AutoTestPanel } from '../components/AutoTestPanel';
 import { ResultPanel } from '../components/ResultPanel';
 import { ResultsPanel } from '../components/ResultsPanel';
 import { RingLegend, RingWheel } from '../components/RingWheel';
 import { SessionSpins, type SessionSpin } from '../components/SessionSpins';
+import { StorageBadge } from '../components/StorageBadge';
+import { useData } from '../data/context';
+import { localDateKey } from '../data/local/provider';
+import type { ConnectedProvider } from '../data/provider';
 import { AudioService } from '../services/audio';
 import type { IUCN, Region, RingSlice, RosterStudent, Settings, SpinLogRow, SpinQueueItem, Taxon } from '../types';
 import { buildRingConfig } from '../utils/rings';
-import { buildQueue, periodsForSemester, type QueueOrder, type Semester } from '../utils/roster';
+import { buildLocalQueue, buildQueue, periodsForSemester, type QueueOrder, type Semester } from '../utils/roster';
 import { DEFAULT_SETTINGS, effectivePairCapPct, parseSettings } from '../utils/settings';
 import { buildSpinLogPayload } from '../utils/spin-log';
 import {
@@ -46,7 +50,15 @@ const prefersReducedMotion = (): boolean =>
 const todayIso = (): string => new Date().toISOString().split('T')[0];
 
 export const SpinPage = () => {
-  const configured = isApiConfigured();
+  // This page is remounted whenever the storage mode or the selected class changes
+  // (see App.tsx), so `provider` and `workspace` are fixed for its lifetime and a
+  // queue or history from one place can never carry over into another.
+  const { mode, provider, workspace, workspaces, selectWorkspace } = useData();
+  const isLocal = mode === 'local';
+  // Local Mode always has somewhere to save. Connected Mode needs a complete connection.
+  const configured = isLocal || isApiConfigured();
+  /** Bumped after each successful save so the storage badge re-reads the backup status. */
+  const [savedCount, setSavedCount] = useState(0);
 
   // --- Configuration loaded from the backend -------------------------------
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -101,11 +113,16 @@ export const SpinPage = () => {
   periodRef.current = period;
 
   const fetchLoggedSpins = useCallback(() => {
-    if (!isApiConfigured()) return;
+    if (!configured) return;
     setLoggedLoading(true);
     setLoggedError(null);
-    api
-      .getSpins({ date: todayIso(), period: periodRef.current || undefined })
+    // Local Mode: "today" is the calendar day on this computer, and a class is its own log.
+    // Connected Mode: unchanged (UTC day, filtered by period).
+    const filters = isLocal
+      ? { date: localDateKey(new Date()) }
+      : { date: todayIso(), period: periodRef.current || undefined };
+    provider
+      .getSpins(filters)
       .then((rows) => {
         // Auto-test rows are kept out of the classroom history view.
         setLoggedRows(rows.filter((row) => !row.is_test));
@@ -113,12 +130,12 @@ export const SpinPage = () => {
       })
       .catch((err) => setLoggedError(`Could not load today's spins. ${describeError(err)}`))
       .finally(() => setLoggedLoading(false));
-  }, []);
+  }, [configured, isLocal, provider]);
 
   const loadConfig = useCallback(() => {
-    if (!isApiConfigured()) return;
+    if (!configured) return;
     setConfigState('loading');
-    Promise.all([api.settings(), api.rings()])
+    Promise.all([provider.settings(), provider.rings()])
       .then(([settingsRows, rings]) => {
         const parsed = parseSettings(settingsRows);
         setSettings(parsed.settings);
@@ -131,7 +148,7 @@ export const SpinPage = () => {
         setConfigError(describeError(err));
         setConfigState('error');
       });
-  }, []);
+  }, [configured, provider]);
 
   useEffect(() => {
     loadConfig();
@@ -153,11 +170,12 @@ export const SpinPage = () => {
 
   /** Send one spin to the backend. The status only becomes "logged" on a confirmed write. */
   const sendLog = useCallback(
-    (entry: Pick<SessionSpin, 'id' | 'payload'>) => {
+    (entry: Pick<SessionSpin, 'id' | 'payload' | 'studentId'>) => {
       updateSessionSpin(entry.id, { status: 'pending', error: undefined });
-      api
-        .logSpin(entry.payload)
+      provider
+        .logSpin(entry.payload, { studentId: entry.studentId ?? null })
         .then((result) => {
+          setSavedCount((count) => count + 1);
           // "logged" is reserved for a write the backend confirmed as complete.
           if (result.complete === true) {
             updateSessionSpin(entry.id, { status: 'logged', error: undefined });
@@ -174,7 +192,7 @@ export const SpinPage = () => {
         })
         .catch((err) => updateSessionSpin(entry.id, { status: 'failed', error: describeError(err) }));
     },
-    [fetchLoggedSpins]
+    [fetchLoggedSpins, provider]
   );
 
   const recordOutcome = (next: SpinOutcome, student: SpinQueueItem | null) => {
@@ -186,20 +204,18 @@ export const SpinPage = () => {
       isTest: false,
     });
     const id = `${sessionId}-${++logCounter.current}`;
-    const canLog = isApiConfigured();
-    setSessionSpins((prev) => [{ id, payload, status: canLog ? 'pending' : 'local_only' }, ...prev]);
+    const canLog = configured;
+    // The roster id only exists, and is only stored, in Local Mode.
+    const studentId = isLocal && student ? student.id : null;
+    setSessionSpins((prev) => [{ id, payload, studentId, status: canLog ? 'pending' : 'local_only' }, ...prev]);
     setResultLogId(id);
 
     // The student has had their turn whether or not the log write succeeds.
     if (student) {
-      setQueue((prev) =>
-        prev.map((item) =>
-          item.email === student.email && item.period === student.period ? { ...item, hasSpun: true } : item
-        )
-      );
+      setQueue((prev) => prev.map((item) => (item.id === student.id ? { ...item, hasSpun: true } : item)));
     }
 
-    if (canLog) sendLog({ id, payload });
+    if (canLog) sendLog({ id, payload, studentId });
   };
 
   const retryLog = (id: string) => {
@@ -327,7 +343,15 @@ export const SpinPage = () => {
     setResultLogId(null);
     setResultStudent(row.student_name || null);
     setCurrentStudent(
-      row.student_name ? { email: row.email, name: row.student_name, period: row.period, hasSpun: true } : null
+      row.student_name
+        ? {
+            id: row.student_id ?? `${row.email.trim().toLowerCase()}|${row.period.toUpperCase()}`,
+            email: row.email,
+            name: row.student_name,
+            period: row.period,
+            hasSpun: true,
+          }
+        : null
     );
     setVetoTarget(null);
     setShowRegionPicker(false);
@@ -336,6 +360,26 @@ export const SpinPage = () => {
   // --- Class queue ----------------------------------------------------------
 
   const handleLoadRoster = async () => {
+    if (isLocal) {
+      // The class roster is already in this browser. Nothing is fetched.
+      const built = buildLocalQueue(workspace.students, orderMode, createRng(randomSeed()));
+      const inactive = workspace.students.filter((student) => !student.active).length;
+      setQueue(built);
+      setCurrentStudent(null);
+      setQueueStatus(
+        built.length === 0
+          ? { text: `"${workspace.name}" has no active students yet. Add them under Classes.`, isError: true }
+          : {
+              text: `Loaded ${built.length} students for "${workspace.name}".${
+                inactive > 0 ? ` ${inactive} inactive student${inactive === 1 ? '' : 's'} left out.` : ''
+              }`,
+              isError: false,
+            }
+      );
+      fetchLoggedSpins();
+      return;
+    }
+
     if (!isApiConfigured()) {
       setQueueStatus({ text: 'The backend is not configured, so the roster cannot be loaded.', isError: true });
       return;
@@ -345,7 +389,7 @@ export const SpinPage = () => {
     if (!students) {
       try {
         setQueueStatus({ text: 'Loading roster…', isError: false });
-        students = await api.roster();
+        students = await (provider as ConnectedProvider).roster();
         setRoster(students);
       } catch (err) {
         setQueueStatus({ text: `Could not load the roster. ${describeError(err)}`, isError: true });
@@ -379,9 +423,7 @@ export const SpinPage = () => {
   };
 
   const periodOptions = roster ? periodsForSemester(roster, semester) : [];
-  const currentHasSpun = currentStudent
-    ? queue.some((q) => q.email === currentStudent.email && q.period === currentStudent.period && q.hasSpun)
-    : false;
+  const currentHasSpun = currentStudent ? queue.some((q) => q.id === currentStudent.id && q.hasSpun) : false;
 
   const resultLog = resultLogId ? sessionSpins.find((s) => s.id === resultLogId) : undefined;
   const latestPayload = sessionSpins[0]?.payload;
@@ -402,11 +444,16 @@ export const SpinPage = () => {
         </div>
         <div className="flex items-center gap-4">
           <ApiStatusIndicator />
+          <Link to="/classes" className="btn">
+            Classes
+          </Link>
           <Link to="/admin" className="btn">
             Admin
           </Link>
         </div>
       </header>
+
+      <StorageBadge revision={savedCount} />
 
       <ApiNotConfiguredBanner />
 
@@ -443,34 +490,55 @@ export const SpinPage = () => {
               Class
             </h2>
             <div className="flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="eyebrow">Semester</span>
-                <select className="field" value={semester} onChange={(e) => setSemester(e.target.value as Semester)}>
-                  <option value="S1">S1</option>
-                  <option value="S2">S2</option>
-                </select>
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="eyebrow">Period</span>
-                {periodOptions.length > 0 ? (
-                  <select className="field" value={period} onChange={(e) => setPeriod(e.target.value)} data-testid="period-select">
-                    {!periodOptions.includes(period) && <option value={period}>{period}</option>}
-                    {periodOptions.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
+              {isLocal ? (
+                <label className="flex flex-col gap-1">
+                  <span className="eyebrow">Class</span>
+                  <select
+                    className="field max-w-[14rem]"
+                    value={workspace.id}
+                    onChange={(e) => selectWorkspace(e.target.value)}
+                    disabled={spinning}
+                    data-testid="class-select"
+                  >
+                    {workspaces.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {candidate.name}
                       </option>
                     ))}
                   </select>
-                ) : (
-                  <input
-                    type="text"
-                    className="field w-20"
-                    value={period}
-                    maxLength={4}
-                    onChange={(e) => setPeriod(e.target.value.toUpperCase())}
-                  />
-                )}
-              </label>
+                </label>
+              ) : (
+                <>
+                  <label className="flex flex-col gap-1">
+                    <span className="eyebrow">Semester</span>
+                    <select className="field" value={semester} onChange={(e) => setSemester(e.target.value as Semester)}>
+                      <option value="S1">S1</option>
+                      <option value="S2">S2</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="eyebrow">Period</span>
+                    {periodOptions.length > 0 ? (
+                      <select className="field" value={period} onChange={(e) => setPeriod(e.target.value)} data-testid="period-select">
+                        {!periodOptions.includes(period) && <option value={period}>{period}</option>}
+                        {periodOptions.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        className="field w-20"
+                        value={period}
+                        maxLength={4}
+                        onChange={(e) => setPeriod(e.target.value.toUpperCase())}
+                      />
+                    )}
+                  </label>
+                </>
+              )}
               <label className="flex flex-col gap-1">
                 <span className="eyebrow">Order</span>
                 <select className="field" value={orderMode} onChange={(e) => setOrderMode(e.target.value as QueueOrder)}>
@@ -501,11 +569,10 @@ export const SpinPage = () => {
             {queue.length > 0 && (
               <ol className="mt-3 max-h-64 space-y-1 overflow-y-auto pr-1 text-sm" data-testid="queue">
                 {queue.map((item) => {
-                  const isCurrent =
-                    currentStudent !== null && currentStudent.email === item.email && currentStudent.period === item.period;
+                  const isCurrent = currentStudent !== null && currentStudent.id === item.id;
                   return (
                     <li
-                      key={`${item.email}-${item.period}`}
+                      key={item.id}
                       className={`flex items-center justify-between gap-2 rounded-md px-2 py-1 ${isCurrent ? 'bg-sun/20 font-bold' : ''}`}
                       aria-current={isCurrent ? 'true' : undefined}
                     >
@@ -637,7 +704,7 @@ export const SpinPage = () => {
       <section className="panel" aria-labelledby="logged-heading">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
           <h2 id="logged-heading" className="text-xl font-bold">
-            Today in the log{period ? `, period ${period}` : ''}
+            {isLocal ? `Today in "${workspace.name}"` : `Today in the log${period ? `, period ${period}` : ''}`}
           </h2>
           <div className="flex items-center gap-3 text-sm text-ink-dim">
             {hiddenTestRows > 0 && <span>{hiddenTestRows} test rows hidden</span>}

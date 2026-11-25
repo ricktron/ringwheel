@@ -10,14 +10,13 @@
  * `ok: false`. This client turns each of those into a typed ApiError. A call
  * only resolves when the backend positively confirmed it.
  *
- * Configuration (first match wins):
- * 1. Values saved in this browser from the Admin page (localStorage).
- * 2. Build-time env vars: VITE_SPIN_API_URL, VITE_RINGWHEEL_API_TOKEN
- *    (VITE_SPIN_API_TOKEN is still read as a legacy fallback).
+ * This client is only used in Connected Mode (see src/data/). Local Mode never
+ * imports or calls it.
  *
- * SECURITY: anything in a VITE_ variable is compiled into the JavaScript bundle
- * and can be read by anyone who can load the site. Never treat it as a secret.
- * See docs/SECURITY.md for the recommended setup.
+ * Configuration comes from one place: values the teacher saved in this
+ * browser on the Admin page. Nothing is read from build-time environment
+ * variables, so a built copy of the site never contains a backend address or
+ * token. See docs/SECURITY.md.
  */
 import type { RingName, RingSlice, RosterStudent, SettingRow, SpinLogRow, SpinsLogPayload } from './types';
 
@@ -60,13 +59,12 @@ export const STORAGE_KEYS = {
 export interface ApiConfig {
   url: string;
   token: string;
-  /** Where the token came from. A build-time token is public to anyone with the site. */
-  tokenSource: 'browser' | 'build' | 'none';
+  /** Where the token came from: saved in this browser by the teacher, or nowhere. */
+  tokenSource: 'browser' | 'none';
   /** Human-readable reasons the API cannot be used. Empty when usable. */
   problems: string[];
 }
 
-type EnvLike = Record<string, string | boolean | undefined>;
 type StorageLike = Pick<Storage, 'getItem'>;
 
 const looksLikePlaceholder = (value: string): boolean =>
@@ -80,36 +78,26 @@ function readStorage(storage: StorageLike | undefined, key: string): string {
   }
 }
 
-const envString = (env: EnvLike, key: string): string => {
-  const value = env[key];
-  return typeof value === 'string' ? value.trim() : '';
-};
-
-/** Work out the API settings and say exactly what is wrong when they are unusable. */
-export function resolveApiConfig(env: EnvLike, storage?: StorageLike): ApiConfig {
-  const storedUrl = readStorage(storage, STORAGE_KEYS.url);
-  const storedToken = readStorage(storage, STORAGE_KEYS.token);
-  const envToken = envString(env, 'VITE_RINGWHEEL_API_TOKEN') || envString(env, 'VITE_SPIN_API_TOKEN');
-
-  const url = storedUrl || envString(env, 'VITE_SPIN_API_URL');
-  const token = storedToken || envToken;
-  const tokenSource: ApiConfig['tokenSource'] = storedToken ? 'browser' : envToken ? 'build' : 'none';
+/** Work out the connection settings and say exactly what is wrong when they are unusable. */
+export function resolveApiConfig(storage?: StorageLike): ApiConfig {
+  const url = readStorage(storage, STORAGE_KEYS.url);
+  const token = readStorage(storage, STORAGE_KEYS.token);
 
   const problems: string[] = [];
   if (!url) {
     problems.push('The backend URL is not set.');
   } else if (looksLikePlaceholder(url)) {
-    problems.push('The backend URL is still the placeholder from the example file.');
+    problems.push('The backend URL is a placeholder, not a real address.');
   } else if (!/^https?:\/\//i.test(url)) {
     problems.push('The backend URL must start with https://.');
   }
   if (!token) {
     problems.push('The API token is not set.');
   } else if (looksLikePlaceholder(token)) {
-    problems.push('The API token is still the placeholder from the example file.');
+    problems.push('The API token is a placeholder, not a real token.');
   }
 
-  return { url, token, tokenSource, problems };
+  return { url, token, tokenSource: token ? 'browser' : 'none', problems };
 }
 
 function browserStorage(): Storage | undefined {
@@ -122,7 +110,7 @@ function browserStorage(): Storage | undefined {
 
 /** Current configuration, re-read on every call so Admin page changes apply immediately. */
 export function getApiConfig(): ApiConfig {
-  return resolveApiConfig(import.meta.env as EnvLike, browserStorage());
+  return resolveApiConfig(browserStorage());
 }
 
 export function isApiConfigured(): boolean {

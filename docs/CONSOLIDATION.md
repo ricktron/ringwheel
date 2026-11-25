@@ -2,6 +2,10 @@
 
 Date: 2026-11-24
 
+> This is a dated record of the consolidation (PR 8). Later changes are described elsewhere:
+> Local Mode, Connected Mode and the end of build-time configuration in
+> [`LOCAL_MODE.md`](LOCAL_MODE.md), hosting in [`VERCEL.md`](VERCEL.md).
+
 This records how the two Ringwheel applications were merged into one, what was kept from each,
 what changed in behavior, what is still open, and how to retire the second repository.
 
@@ -163,6 +167,11 @@ conflicts with the Master Guide.
 What is switched off pending your approval: D1 (`usePairCapSetting`) and D3 (`applyRingWeights`).
 What is not built pending your approval: D2, D5, D6, D8, D11.
 What changed and needs your yes or no: D12 to D15.
+
+**Recorded 2026-11-25:** D12 to D15 were approved by the owner in the merge of PR #8 on
+2026-11-24 ("Approved D12-D15. Retain all other policy and production deployment gates.").
+D1 to D11 are still open. Nothing in them has been decided or changed since this table was
+written. The Master Guide (section 7.5) carries the same status.
 
 ## 6. Security
 

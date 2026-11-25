@@ -46,11 +46,11 @@ Do not hardcode API tokens, script IDs, or any sensitive values.
 
 Keep secrets in:
 
-.env / .env.local (frontend dev) and deployment env vars.
-
 Apps Script script properties / secret storage, not in source.
 
-Do not change how env is loaded unless the task explicitly asks for it.
+The teacher's own browser, entered on the Admin page. That is the only place the frontend gets a backend address or token.
+
+Never in a .env file, a VITE_ variable, a deployment environment variable, or any file in this repository. The frontend reads no build-time configuration (changed 2026-11-24, see docs/LOCAL_MODE.md and docs/SECURITY.md). Do not reintroduce it.
 
 Respect Sheets / CSV contracts
 
@@ -119,20 +119,26 @@ Use this AGENTS.md as the repo-local implementation contract and workflow guide.
 
 1.2 Current structure
 Updated 2026-11-24 to match the repository after the consolidation of the
-ringwheel-classroom-spinner prototype (see docs/CONSOLIDATION.md).
+ringwheel-classroom-spinner prototype (see docs/CONSOLIDATION.md) and the
+addition of Local Mode (see docs/LOCAL_MODE.md).
 
 text
 ringwheel/
   src/                    # Frontend (Vite, React, TypeScript, Tailwind CSS 4)
-    api.ts                # The ONLY module that talks to the backend
-    components/           # RingWheel, ResultPanel, SessionSpins, AutoTestPanel, ...
-    pages/                # SpinPage, AdminPage
+    api.ts                # Apps Script client. Used ONLY by Connected Mode.
+    data/
+      provider.ts         # DataProvider: the ONLY interface pages use for data
+      mode.ts             # Which storage is in charge (local by default)
+      DataRoot.tsx        # Opens browser storage, supplies the active provider
+      local/              # Local Mode: schema, IndexedDB store, backup, CSV. NO network.
+    components/           # RingWheel, ResultPanel, SessionSpins, StorageBadge, ...
+    pages/                # SpinPage, ClassesPage, AdminPage
     services/audio.ts     # Sound effects
     utils/
       spin-engine.ts      # The ONLY place a spin is decided (sensitive core)
-      settings.ts         # Settings sheet rows <-> typed settings, merge-safe saves
-      rings.ts            # Rings sheet rows -> engine config, merge-safe saves
-      roster.ts           # Class queue building
+      settings.ts         # Settings rows <-> typed settings, merge-safe saves
+      rings.ts            # Rings rows -> engine config, merge-safe saves
+      roster.ts           # Class queue building (both modes)
       spin-log.ts         # SpinsLog row building
     **/*.test.ts          # Unit tests (vitest)
   gas/                    # Apps Script backend: the only backend
@@ -145,15 +151,17 @@ ringwheel/
     Settings.csv
     SpinsLog.csv
   tests/gas/              # Backend test harness (fake Sheets) and contract tests
-  e2e/                    # Browser smoke test and local fake backend
-  docs/                   # CONSOLIDATION.md, verification.md
+  tests/local/            # Local storage contract, backup, restore and import tests
+  tests/repo/             # Hygiene guards: no credentials, Local Mode stays off the network
+  e2e/                    # Browser tests (both modes, hosted build) and local fake backend
+  docs/                   # LOCAL_MODE.md, VERCEL.md, SECURITY.md, CONSOLIDATION.md, verification.md
+  vercel.json             # Static hosting config: route fallback and security headers
   KB/                     # Project knowledge base
     AGENTS.md             # This file
     Ringwheel_KB_01_AI_Development.md   # The Working Agreements
     Ringwheel_Master_Guide_v1.md
     Ringwheel_README_Using_The_KB.md
   .github/workflows/ci.yml
-  .env.example
   package.json
 
 Key points:
@@ -164,7 +172,17 @@ schema/*.csv define the sheet contracts for roster, rings, settings, and spin lo
 
 src/utils/spin-engine.ts is the single source of truth for spin behavior. Do not add a second spin path.
 
-src/api.ts is the single API client. Do not call fetch from components.
+Pages and components read and write data only through the DataProvider from src/data/. Do not call fetch, and do not import src/api.ts, from a page or component.
+
+src/data/local/ must never make a network request or import the backend client. Local Mode is the default for every visitor, and student data in it must stay in the browser.
+
+There is no .env file and no build-time configuration. Do not add a VITE_ variable for a backend address or token. Connected Mode is configured by the teacher on the Admin page.
+
+Changing the shape of local data requires a schema version bump and a migration step (see docs/LOCAL_MODE.md).
+
+Anything that deletes or replaces a local class goes through WorkspaceStore.replaceClasses (or clearAll with the classes the page showed), with the fingerprint of what the teacher was looking at. Do not add a path that reads a class in one step and removes it in another: a spin logged from a second tab in between would be lost (see "Destructive actions and other tabs" in docs/LOCAL_MODE.md).
+
+Recording a backup (markBackedUp / confirmBackup) happens only after the teacher confirms they have the file. Never record it when a download merely starts.
 
 KB/ holds the core KB that all non-trivial work must respect.
 

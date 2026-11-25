@@ -15,9 +15,19 @@ npm run test:e2e
 
 Both must finish with no failures.
 
-## Before class (about two minutes)
+## Before class, Local Mode (about one minute)
 
-- [ ] The app loads and the top right says "Backend: connected".
+- [ ] The page says "Local Mode" and the top right says "Browser storage: working".
+- [ ] The class named in the Local Mode line is the one you mean to use.
+- [ ] Load Roster lists the students you expect.
+- [ ] Next Spinner, then SPIN. The result panel says "Saved in this browser".
+- [ ] If the Local Mode line says "No confirmed backup" or "Not in a confirmed backup", download
+      a backup from Classes when class is over, check the file is in your downloads folder, and
+      answer "Yes, I have the file". The backup is only recorded once you answer.
+
+## Before class, Connected Mode (about two minutes)
+
+- [ ] The page says "Connected Mode" and the top right says "Backend: connected".
 - [ ] No yellow or red banner is showing.
 - [ ] Load Roster for a demo period lists the students you expect.
 - [ ] Next Spinner, then SPIN. The wheel stops with the result under the pointer and the
@@ -38,9 +48,9 @@ Both must finish with no failures.
 
 ## After a frontend deploy
 
-- [ ] The checks under "Before class" pass on the deployed site.
-- [ ] If the site is reachable by other people, the Admin page says the API token source is
-      "saved in this browser", not "built into the site".
+- [ ] The checks under "Before class, Local Mode" pass on the deployed site.
+- [ ] `/spin`, `/classes` and `/admin` each open directly and survive a refresh.
+- [ ] A first visit in a private window starts in Local Mode with nothing configured.
 
 ## If something is wrong
 

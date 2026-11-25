@@ -1,3 +1,4 @@
+import { useData } from '../data/context';
 import type { SpinOutcome } from '../utils/spin-engine';
 
 /**
@@ -36,6 +37,9 @@ const STATUS_STYLE: Record<LogStatus, string> = {
 
 /** Says, in words and not only color, whether a spin reached the SpinsLog sheet. */
 export function LogStatusBadge({ status, error }: LogStatusBadgeProps) {
+  const { mode } = useData();
+  // Say where the spin went, so "saved" is never mistaken for "saved to the Sheet".
+  const text = status === 'logged' && mode === 'local' ? 'Saved in this browser' : STATUS_TEXT[status];
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-sm font-bold ${STATUS_STYLE[status]}`}
@@ -46,7 +50,7 @@ export function LogStatusBadge({ status, error }: LogStatusBadgeProps) {
       <span aria-hidden="true">
         {status === 'logged' || status === 'unverified' ? '✓' : status === 'pending' ? '…' : '!'}
       </span>
-      {STATUS_TEXT[status]}
+      {text}
     </span>
   );
 }

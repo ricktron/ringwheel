@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ApiError, api, describeError, getApiConfig, isApiConfigured, saveBrowserApiConfig, type SheetSnapshot } from '../api';
+import { ApiError, describeError, getApiConfig, isApiConfigured, saveBrowserApiConfig, type SheetSnapshot } from '../api';
 import { ApiNotConfiguredBanner, ApiStatusIndicator } from '../components/ApiStatusIndicator';
+import { StorageBadge } from '../components/StorageBadge';
+import { useData } from '../data/context';
 import type { RingSlice, SettingRow, Settings } from '../types';
 import { mergeRingWeights, ringWeightsFromRows, validateRingWeights, type RingWeights } from '../utils/rings';
 import { DEFAULT_SETTINGS, mergeSettingsRows, parseSettings } from '../utils/settings';
@@ -33,7 +35,12 @@ const BOOLEAN_SETTINGS: { key: keyof Settings; label: string; hint?: string }[] 
 const EMPTY_SNAPSHOT = { rows: [], base: [] };
 
 export const AdminPage = () => {
-  const [loadState, setLoadState] = useState<LoadState>(isApiConfigured() ? 'loading' : 'idle');
+  // Remounted when the storage mode or selected class changes (see App.tsx).
+  const { mode, provider, setMode, workspace } = useData();
+  const isLocal = mode === 'local';
+  const usable = isLocal || isApiConfigured();
+  const where = isLocal ? 'in this browser' : 'to the sheet';
+  const [loadState, setLoadState] = useState<LoadState>(usable ? 'loading' : 'idle');
   const [loadError, setLoadError] = useState('');
   const [notice, setNotice] = useState<Notice>(null);
   const [saving, setSaving] = useState(false);
@@ -55,13 +62,13 @@ export const AdminPage = () => {
   const [connToken, setConnToken] = useState('');
 
   const load = useCallback(() => {
-    if (!isApiConfigured()) {
+    if (!usable) {
       setLoadState('idle');
       return;
     }
     setLoadState('loading');
     setConflict(false);
-    Promise.all([api.readSettings(), api.readRings()])
+    Promise.all([provider.readSettings(), provider.readRings()])
       .then(([loadedSettings, loadedRings]) => {
         setSettingsSnap(loadedSettings);
         setRingsSnap(loadedRings);
@@ -73,7 +80,7 @@ export const AdminPage = () => {
         setLoadError(describeError(err));
         setLoadState('error');
       });
-  }, []);
+  }, [provider, usable]);
 
   useEffect(() => {
     load();
@@ -99,14 +106,14 @@ export const AdminPage = () => {
       const saved = await saveGuarded({
         sheetName: 'Settings',
         loaded: settingsSnap,
-        read: api.readSettings,
-        write: api.writeSettings,
+        read: provider.readSettings,
+        write: provider.writeSettings,
         buildRows: (current) => mergeSettingsRows(current, settings),
         identify: (row) => String(row.key ?? ''),
         adminToken: adminToken || undefined,
       });
       setSettingsSnap(saved);
-      setNotice({ text: 'Settings saved to the sheet.', isError: false });
+      setNotice({ text: `Settings saved ${where}.`, isError: false });
     } catch (err) {
       setConflict(err instanceof ApiError && err.kind === 'conflict');
       setNotice({ text: `Settings were NOT saved. ${describeError(err)}`, isError: true });
@@ -128,14 +135,14 @@ export const AdminPage = () => {
       const saved = await saveGuarded({
         sheetName: 'Rings',
         loaded: ringsSnap,
-        read: api.readRings,
-        write: api.writeRings,
+        read: provider.readRings,
+        write: provider.writeRings,
         buildRows: (current) => mergeRingWeights(current, weights),
         identify: (row) => `${String(row.ring_name ?? '')} ${String(row.label ?? '')}`.trim(),
         adminToken: adminToken || undefined,
       });
       setRingsSnap(saved);
-      setNotice({ text: 'Weights saved to the sheet.', isError: false });
+      setNotice({ text: `Weights saved ${where}.`, isError: false });
     } catch (err) {
       setConflict(err instanceof ApiError && err.kind === 'conflict');
       setNotice({ text: `Weights were NOT saved. ${describeError(err)}`, isError: true });
@@ -144,26 +151,37 @@ export const AdminPage = () => {
     }
   };
 
+  /**
+   * Connected Mode is only ever turned on here, by the teacher, after entering
+   * a complete connection. Switching modes never copies data in either direction.
+   */
   const handleSaveConnection = () => {
     try {
       // An empty token field keeps the token that is already saved in this browser.
-      const tokenToSave = connToken || (config.tokenSource === 'browser' ? config.token : '');
-      saveBrowserApiConfig(connUrl, tokenToSave);
+      saveBrowserApiConfig(connUrl, connToken || config.token);
+      const problems = getApiConfig().problems;
+      if (problems.length > 0) {
+        setNotice({ text: `Connected Mode was not turned on. ${problems.join(' ')}`, isError: true });
+        return;
+      }
       setConnToken('');
-      setNotice({ text: 'Connection saved in this browser.', isError: false });
-      load();
+      setNotice({ text: 'Connection saved in this browser. Connected Mode is on.', isError: false });
+      if (isLocal) setMode('connected');
+      else load();
     } catch (err) {
       setNotice({ text: `Connection was not saved. ${describeError(err)}`, isError: true });
     }
   };
 
+  const handleUseLocal = () => setMode('local');
+
   const handleClearConnection = () => {
     try {
       saveBrowserApiConfig('', '');
-      setConnUrl(getApiConfig().url);
+      setConnUrl('');
       setConnToken('');
-      setNotice({ text: 'Connection settings removed from this browser.', isError: false });
-      load();
+      setNotice({ text: 'Connection removed from this browser. Local Mode is on.', isError: false });
+      if (!isLocal) setMode('local');
     } catch (err) {
       setNotice({ text: describeError(err), isError: true });
     }
@@ -178,11 +196,16 @@ export const AdminPage = () => {
         <h1 className="text-4xl font-extrabold text-sun">Ringwheel admin</h1>
         <div className="flex items-center gap-4">
           <ApiStatusIndicator key={`${config.url}|${config.tokenSource}`} />
+          <Link to="/classes" className="btn">
+            Classes
+          </Link>
           <Link to="/spin" className="btn btn-primary">
             Back to spinner
           </Link>
         </div>
       </header>
+
+      <StorageBadge />
 
       <ApiNotConfiguredBanner />
 
@@ -190,7 +213,7 @@ export const AdminPage = () => {
         <div className="rounded-xl border-2 border-bad bg-bad/10 p-4" role="alert" data-testid="admin-load-error">
           <h2 className="text-lg font-bold text-bad">The current settings could not be loaded</h2>
           <p className="mt-1">{loadError}</p>
-          <p className="mt-1">Saving is turned off so the sheet is not overwritten with defaults.</p>
+          <p className="mt-1">Saving is turned off so nothing is overwritten with defaults.</p>
           <button type="button" className="btn mt-2" onClick={load}>
             Try again
           </button>
@@ -334,11 +357,27 @@ export const AdminPage = () => {
 
       <section className="panel" aria-labelledby="connection-heading">
         <h2 id="connection-heading" className="mb-1 text-2xl font-bold">
-          Connection
+          Where data is kept
         </h2>
+        <p className="mb-3" data-testid="storage-authority">
+          {isLocal ? (
+            <>
+              <strong>Local Mode is on.</strong> Class "{workspace.name}" and its settings are stored in this browser.
+              Nothing is sent to any server.
+            </>
+          ) : (
+            <>
+              <strong>Connected Mode is on.</strong> Rosters, settings and spins are read from and saved to your Google
+              Sheet through your Apps Script backend.
+            </>
+          )}
+        </p>
+
+        <h3 className="mb-1 text-lg font-semibold text-ember">Connected Mode (optional)</h3>
         <p className="mb-3 text-sm text-ink-dim">
-          Saved in this browser only. Use this instead of build-time variables on any copy of the site that other people
-          can open, because build-time values are readable by everyone who loads the page.
+          For a teacher who runs their own RingWheel Google Sheet. The address and token are saved in this browser only
+          and are never part of the site itself. Switching modes never copies or merges data: each mode keeps its own
+          rosters and history.
         </p>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1 text-sm">
@@ -356,32 +395,33 @@ export const AdminPage = () => {
               autoComplete="off"
             />
           </label>
-          <label className="flex flex-col gap-1 text-sm sm:col-span-2">
-            <span className="eyebrow">Admin token (only if the backend requires one, never stored)</span>
-            <input
-              type="password"
-              className="field"
-              value={adminToken}
-              onChange={(e) => setAdminToken(e.target.value)}
-              autoComplete="off"
-            />
-          </label>
+          {!isLocal && (
+            <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+              <span className="eyebrow">Admin token (only if the backend requires one, never stored)</span>
+              <input
+                type="password"
+                className="field"
+                value={adminToken}
+                onChange={(e) => setAdminToken(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+          )}
         </div>
         <p className="mt-3 text-sm" data-testid="token-source">
-          {config.tokenSource === 'browser' && 'API token source: saved in this browser.'}
-          {config.tokenSource === 'build' && (
-            <span className="text-sun">
-              API token source: built into the site. Anyone who can open this site can read it.
-            </span>
-          )}
-          {config.tokenSource === 'none' && 'API token source: none.'}
+          {config.tokenSource === 'browser' ? 'An API token is saved in this browser.' : 'No API token is saved in this browser.'}
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" className="btn" onClick={handleSaveConnection}>
-            Save connection
+          <button type="button" className="btn" onClick={handleSaveConnection} data-testid="save-connection">
+            {isLocal ? 'Save connection and turn on Connected Mode' : 'Save connection'}
           </button>
-          <button type="button" className="btn" onClick={handleClearConnection}>
-            Remove from this browser
+          {!isLocal && (
+            <button type="button" className="btn" onClick={handleUseLocal} data-testid="use-local">
+              Switch to Local Mode
+            </button>
+          )}
+          <button type="button" className="btn" onClick={handleClearConnection} disabled={config.tokenSource === 'none' && !config.url}>
+            Remove connection from this browser
           </button>
         </div>
       </section>

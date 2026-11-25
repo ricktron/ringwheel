@@ -52,6 +52,7 @@ export function buildQueue(
     }
     seenEmails.add(emailKey);
     queue.push({
+      id: `${emailKey}|${studentPeriod.toUpperCase()}`,
       email: student.email,
       name: `${student.first} ${student.last}`.trim(),
       period: studentPeriod,
@@ -66,4 +67,24 @@ export function buildQueue(
   }
 
   return { queue, duplicatesIgnored };
+}
+
+/** A student as Local Mode stores them. Declared here so this module needs nothing from the storage layer. */
+export interface QueueableStudent {
+  id: string;
+  name: string;
+  email: string;
+  active: boolean;
+}
+
+/**
+ * Build the spin queue for a Local Mode class: every active student, once.
+ * A student marked inactive stays on the roster but is never queued.
+ */
+export function buildLocalQueue(students: QueueableStudent[], order: QueueOrder, rng: Rng): SpinQueueItem[] {
+  const queue: SpinQueueItem[] = students
+    .filter((student) => student.active)
+    .map((student) => ({ id: student.id, email: student.email, name: student.name, period: '', hasSpun: false }));
+  if (order === 'alphabetical') return queue.sort((a, b) => a.name.localeCompare(b.name));
+  return shuffle(queue, rng);
 }

@@ -57,6 +57,8 @@ export interface RosterStudent {
 }
 
 export interface SpinQueueItem {
+  /** Stable within the queue. Connected Mode: email and period. Local Mode: the student's id. */
+  id: string;
   email: string;
   name: string;
   period: string;
@@ -77,6 +79,8 @@ export interface SpinLogRow {
   rule_flags: string[];
   /** True for auto-test rows. Derived from rule flags when the backend omits it. */
   is_test: boolean;
+  /** Local Mode only: the roster id of the student, when there was one. */
+  student_id?: string | null;
 }
 
 /** The exact row shape appended to the SpinsLog sheet. */

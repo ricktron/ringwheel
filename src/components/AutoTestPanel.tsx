@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
-import { api, describeError, isApiConfigured } from '../api';
+import { describeError, isApiConfigured } from '../api';
+import { useData } from '../data/context';
 import { TEST_MODES, runAutoTestCase, type TestMode } from '../utils/auto-test';
 import {
   computeAutoTestMetrics,
@@ -48,7 +49,8 @@ export function AutoTestPanel({ config, pairCapPct, sessionId }: AutoTestPanelPr
   const [metrics, setMetrics] = useState<AutoTestMetrics | null>(null);
   const cancelRef = useRef(false);
 
-  const canLog = isApiConfigured();
+  const { mode, provider } = useData();
+  const canLog = mode === 'local' || isApiConfigured();
 
   const run = async () => {
     const modes = TEST_MODES.filter((mode) => enabled[mode]);
@@ -90,7 +92,7 @@ export function AutoTestPanel({ config, pairCapPct, sessionId }: AutoTestPanelPr
           for (const message of testCase.errors) record(mode, message);
 
           if (logToSheet && canLog) {
-            await api.logSpin(
+            await provider.logSpin(
               buildSpinLogPayload({
                 outcome: testCase.outcome,
                 timestamp: new Date(),
@@ -174,7 +176,7 @@ export function AutoTestPanel({ config, pairCapPct, sessionId }: AutoTestPanelPr
           disabled={running || !canLog}
           onChange={(e) => setLogToSheet(e.target.checked)}
         />
-        Also write test rows to the SpinsLog sheet (marked as test)
+        Also write test rows to the log (marked as test)
       </label>
 
       {summary && (
