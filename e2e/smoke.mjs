@@ -1013,6 +1013,8 @@ await step('a full backup downloads as a file, and is only recorded as a backup 
     assert.match(await text(lp, 'backup-status'), /No confirmed backup/, why);
   };
   await unconfirmed('right after the download started');
+  await confirm.scrollIntoViewIfNeeded();
+  await shot(lp, '13b-backup-confirm');
 
   // The teacher says the file did not save (blocked, cancelled, disk full): nothing is recorded.
   await lp.getByTestId('backup-confirm-no').click();
@@ -1140,6 +1142,9 @@ await step('restoring the backup brings back identical data: a full round trip',
   await lp.getByTestId('restore-add').click();
   await waitNotice(/Restore finished\. Added: Period 3 Ecology, Period 5 Ecology\./);
   assert.deepEqual(await classList().locator('label .font-bold').allInnerTexts(), ['Period 3 Ecology', 'Period 5 Ecology']);
+  // The rename box follows the restored class. It must not offer the starter class's name back.
+  await lp.getByRole('heading', { name: 'Roster for "Period 3 Ecology"' }).waitFor();
+  assert.equal(await lp.getByLabel('Rename selected class').inputValue(), 'Period 3 Ecology');
   // The classes came out of a file the teacher is holding, so they count as backed up as of that file.
   await lp.getByTestId('class-list').getByText(/Last confirmed backup: today/).first().waitFor();
   assert.equal(await lp.getByTestId('class-list').getByText(/Last confirmed backup: today/).count(), 2);
@@ -1209,6 +1214,9 @@ await step('two tabs: a spin logged in another tab makes this tab refuse a stale
   assert.equal(await classList().count(), 2, 'the class was deleted although it had changed in another tab');
   // The page now shows the current version, including the spin from the other tab.
   await p3().getByText(/3 students, 5 spins\./).waitFor();
+  // The status line at the top agrees with the class list about the spin from the other tab.
+  await lp.getByTestId('backup-status').getByText(/Not in a confirmed backup: 1 spin and roster or settings changes/).waitFor();
+  await shot(lp, '14b-stale-delete-refused');
   assert.deepEqual(await lp.getByTestId('recovery-list').locator('li').allInnerTexts(), recoveryBefore, 'a refused delete left a recovery copy');
 });
 

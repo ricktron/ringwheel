@@ -62,6 +62,8 @@ export const ClassesPage = () => {
   const [notice, setNotice] = useState<Notice>(null);
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<Record<string, ClassInfo>>({});
+  /** Goes up each time the details below are re-read, so the status line at the top re-reads too. */
+  const [detailsRevision, setDetailsRevision] = useState(0);
   const [recovery, setRecovery] = useState<RecoveryPoint[]>([]);
   const [protectedStorage, setProtectedStorage] = useState<boolean | null>(null);
   /** Bumped when a change fails, so roster fields snap back to what is actually stored. */
@@ -85,6 +87,14 @@ export const ClassesPage = () => {
 
   const [clearText, setClearText] = useState('');
 
+  // If the stored name of the selected class changes underneath the page (a restore, an undo,
+  // another tab), the rename box follows it instead of offering the old name back.
+  const [nameShown, setNameShown] = useState(workspace.name);
+  if (nameShown !== workspace.name) {
+    setNameShown(workspace.name);
+    setRenameTo(workspace.name);
+  }
+
   // Reset the per-class forms when another class is selected (state adjusted during render).
   const [formsFor, setFormsFor] = useState(workspace.id);
   if (formsFor !== workspace.id) {
@@ -104,6 +114,7 @@ export const ClassesPage = () => {
     }
     setInfo(next);
     setRecovery(await store.listRecoveryPoints());
+    setDetailsRevision((n) => n + 1);
   }, [store]);
 
   // Also re-read whenever the list of classes on screen changes.
@@ -368,7 +379,7 @@ export const ClassesPage = () => {
         </div>
       </header>
 
-      <StorageBadge />
+      <StorageBadge revision={detailsRevision} />
 
       {mode === 'connected' && (
         <p className="rounded-xl border border-sun bg-sun/10 p-4" data-testid="classes-connected-note">
