@@ -180,6 +180,10 @@ There is no .env file and no build-time configuration. Do not add a VITE_ variab
 
 Changing the shape of local data requires a schema version bump and a migration step (see docs/LOCAL_MODE.md).
 
+Anything that deletes or replaces a local class goes through WorkspaceStore.replaceClasses (or clearAll with the classes the page showed), with the fingerprint of what the teacher was looking at. Do not add a path that reads a class in one step and removes it in another: a spin logged from a second tab in between would be lost (see "Destructive actions and other tabs" in docs/LOCAL_MODE.md).
+
+Recording a backup (markBackedUp / confirmBackup) happens only after the teacher confirms they have the file. Never record it when a download merely starts.
+
 KB/ holds the core KB that all non-trivial work must respect.
 
 File name note: this KB refers to the Working Agreements as

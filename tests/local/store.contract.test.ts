@@ -6,7 +6,7 @@ import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it } from 'vitest';
 import { IndexedDbStore } from '../../src/data/local/idb-store';
 import { newId } from '../../src/data/local/schema';
-import { MAX_RECOVERY_POINTS, MemoryStore, StoreConflictError, StoreMissingError, type WorkspaceStore } from '../../src/data/local/store';
+import { MAX_RECOVERY_POINTS, MemoryStore, StoreConflictError, StoreMissingError, stampOf, type WorkspaceStore } from '../../src/data/local/store';
 import { sampleBundle, sampleSpins, sampleWorkspace } from './fixtures';
 
 const stores: [string, () => Promise<WorkspaceStore>][] = [
@@ -113,6 +113,12 @@ describe.each(stores)('%s', (_name, open) => {
     await store.markBackedUp([workspace.id, 'missing'], '2026-11-24T10:00:00.000Z');
     const after = await store.getWorkspace(workspace.id);
     expect(after).toEqual({ ...workspace, lastBackupAt: '2026-11-24T10:00:00.000Z' });
+
+    // A backup time never moves backwards: an older file confirmed later does not hide newer work.
+    await store.markBackedUp([workspace.id], '2026-11-20T10:00:00.000Z');
+    expect((await store.getWorkspace(workspace.id))!.lastBackupAt).toBe('2026-11-24T10:00:00.000Z');
+    await store.markBackedUp([workspace.id], '2026-11-25T10:00:00.000Z');
+    expect((await store.getWorkspace(workspace.id))!.lastBackupAt).toBe('2026-11-25T10:00:00.000Z');
   });
 
   it('writes whole classes all-or-nothing', async () => {
@@ -134,28 +140,83 @@ describe.each(stores)('%s', (_name, open) => {
     expect(await store.getBundle(existing.workspace.id)).toEqual(existing);
   });
 
-  it('replaces a class together with all of its old spins, and only when asked', async () => {
+  it('adding classes never replaces one: an id that is in use is refused', async () => {
+    const store = await open();
+    const original = sampleBundle('Period 3', ['Ada Sample'], 2);
+    await store.putBundles([original]);
+    const impostor = { workspace: { ...original.workspace, name: 'Impostor' }, spins: [] };
+    await expect(store.putBundles([impostor])).rejects.toThrow();
+    expect(await store.getBundle(original.workspace.id)).toEqual(original);
+  });
+
+  it('replaces a class together with all of its old spins, keeps a recovery copy, and moves the revision forward', async () => {
     const store = await open();
     const original = sampleBundle('Period 3', ['Ada Sample', 'Ben Placeholder'], 6);
     const other = sampleBundle('Untouched', ['Eli Testcase'], 3);
     await store.putBundles([original, other]);
 
     const replacement = { workspace: { ...original.workspace, name: 'Period 3 restored' }, spins: sampleSpins(original.workspace, 2) };
-    await store.putBundles([replacement], { replace: [original.workspace.id] });
+    const result = await store.replaceClasses({
+      remove: [{ id: original.workspace.id, expected: stampOf(original), recover: true }],
+      put: [replacement],
+      recovery: { id: 'point-1', takenAt: '2026-11-25T16:00:00.000Z', describe: (recovered) => `Before replacing ${recovered[0].workspace.name}` },
+    });
 
-    expect(await store.getBundle(original.workspace.id)).toEqual(replacement);
+    expect(result.removed).toEqual([original]);
+    expect(result.recoveryPoint).toEqual({ id: 'point-1', takenAt: '2026-11-25T16:00:00.000Z', reason: 'Before replacing Period 3', bundles: [original] });
+    expect(await store.listRecoveryPoints()).toEqual([result.recoveryPoint]);
+    // The replacement is a new state of the class, so its revision is past both versions.
+    expect(await store.getBundle(original.workspace.id)).toEqual({ workspace: { ...replacement.workspace, rev: 2 }, spins: replacement.spins });
     expect(await store.getBundle(other.workspace.id)).toEqual(other);
+
+    // A replacement whose revision is already higher is stored exactly as given (a restore stays an exact copy).
+    const stored = (await store.getBundle(original.workspace.id))!;
+    const ahead = { workspace: { ...original.workspace, rev: 9 }, spins: [] };
+    await store.replaceClasses({ remove: [{ id: original.workspace.id, expected: stampOf(stored), recover: false }], put: [ahead] });
+    expect(await store.getBundle(original.workspace.id)).toEqual(ahead);
   });
 
-  it('deletes one class and its spins and nothing else', async () => {
+  it('removes one class and its spins and nothing else, and only if it is still what the caller saw', async () => {
     const store = await open();
     const keep = sampleBundle('Keep');
     const drop = sampleBundle('Drop');
     await store.putBundles([keep, drop]);
-    await store.deleteWorkspace(drop.workspace.id);
+
+    // Wrong fingerprint: refused, nothing changes, no recovery point.
+    await expect(
+      store.replaceClasses({
+        remove: [{ id: drop.workspace.id, expected: stampOf(keep), recover: true }],
+        put: [],
+        recovery: { id: 'p', takenAt: '2026-11-25T16:00:00.000Z', describe: () => 'never stored' },
+      })
+    ).rejects.toBeInstanceOf(StoreConflictError);
+    expect((await store.listWorkspaces()).map((w) => w.name)).toEqual(['Drop', 'Keep']);
+    expect(await store.listRecoveryPoints()).toEqual([]);
+
+    // A class that is not there at all is also a conflict, not a silent success.
+    await expect(store.replaceClasses({ remove: [{ id: 'gone', expected: 'x', recover: false }], put: [] })).rejects.toBeInstanceOf(StoreConflictError);
+
+    const result = await store.replaceClasses({ remove: [{ id: drop.workspace.id, expected: stampOf(drop), recover: false }], put: [] });
+    expect(result).toEqual({ removed: [drop], recoveryPoint: null });
     expect((await store.listWorkspaces()).map((w) => w.name)).toEqual(['Keep']);
     expect(await store.listSpins(drop.workspace.id)).toEqual([]);
     expect(await store.getBundle(keep.workspace.id)).toEqual(keep);
+    expect(await store.listRecoveryPoints()).toEqual([]);
+  });
+
+  it('a recovery point written by a class change obeys the same limit as any other', async () => {
+    const store = await open();
+    for (let i = 0; i < MAX_RECOVERY_POINTS; i++) {
+      await store.addRecoveryPoint({ id: `old${i}`, takenAt: `2026-11-0${i + 1}T00:00:00.000Z`, reason: `point ${i}`, bundles: [sampleBundle()] });
+    }
+    const bundle = sampleBundle('Newest');
+    await store.putBundles([bundle]);
+    await store.replaceClasses({
+      remove: [{ id: bundle.workspace.id, expected: stampOf(bundle), recover: true }],
+      put: [],
+      recovery: { id: 'newest', takenAt: '2026-11-20T00:00:00.000Z', describe: () => 'newest' },
+    });
+    expect((await store.listRecoveryPoints()).map((p) => p.id)).toEqual(['newest', 'old4', 'old3', 'old2', 'old1']);
   });
 
   it(`keeps only the ${MAX_RECOVERY_POINTS} newest recovery points`, async () => {
@@ -174,7 +235,13 @@ describe.each(stores)('%s', (_name, open) => {
     const bundle = sampleBundle();
     await store.putBundles([bundle]);
     await store.addRecoveryPoint({ id: 'p', takenAt: '2026-11-01T00:00:00.000Z', reason: 'r', bundles: [bundle] });
-    await store.clearAll();
+    // With a list of what the caller saw, it only goes ahead if that is still what is stored.
+    await expect(store.clearAll({})).rejects.toBeInstanceOf(StoreConflictError);
+    await expect(store.clearAll({ [bundle.workspace.id]: 'not-the-fingerprint' })).rejects.toBeInstanceOf(StoreConflictError);
+    expect(await store.getBundle(bundle.workspace.id)).toEqual(bundle);
+    expect(await store.listRecoveryPoints()).toHaveLength(1);
+
+    await store.clearAll({ [bundle.workspace.id]: stampOf(bundle) });
     expect(await store.listWorkspaces()).toEqual([]);
     expect(await store.listSpins(bundle.workspace.id)).toEqual([]);
     expect(await store.listRecoveryPoints()).toEqual([]);

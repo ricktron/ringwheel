@@ -6,13 +6,14 @@ import { StorageBadge } from '../components/StorageBadge';
 import { useData } from '../data/context';
 import { parseRosterCsv, planRosterImport, rosterToCsv, sameStudent, spinsToCsv, type RosterImportPlan } from '../data/local/csv';
 import { LIMITS, parseBackupText, type BackupFile, type LocalStudent, type Workspace } from '../data/local/schema';
-import type { RecoveryPoint } from '../data/local/store';
+import { stampOf, type RecoveryPoint } from '../data/local/store';
 import {
   addStudents,
   addWorkspace,
   applyRecoveryPoint,
   backupStatus,
   clearAllData,
+  confirmBackup,
   deleteWorkspace,
   describeBackup,
   exportBackup,
@@ -22,6 +23,7 @@ import {
   restoreBackup,
   updateStudent,
   type BackupStatus,
+  type SeenClasses,
 } from '../data/local/workspaces';
 import { saveActiveWorkspaceId } from '../data/mode';
 
@@ -30,6 +32,13 @@ type Notice = { text: string; isError: boolean } | null;
 interface ClassInfo {
   spins: number;
   backup: BackupStatus;
+  /** Fingerprint of the class (roster, settings and spin history) as this page last showed it. */
+  stamp: string;
+}
+
+interface PendingBackup {
+  backup: BackupFile;
+  filename: string;
 }
 
 /** Hand a file to the browser's download flow. The data never leaves this computer. */
@@ -69,6 +78,8 @@ export const ClassesPage = () => {
   const [csvText, setCsvText] = useState('');
   const [importPlan, setImportPlan] = useState<RosterImportPlan | null>(null);
 
+  /** A backup file handed to the browser that the teacher has not yet said they have. */
+  const [pendingBackup, setPendingBackup] = useState<PendingBackup | null>(null);
   const [restoreFile, setRestoreFile] = useState<{ name: string; backup: BackupFile } | null>(null);
   const [restoreErrors, setRestoreErrors] = useState<string[]>([]);
 
@@ -87,17 +98,24 @@ export const ClassesPage = () => {
   /** Re-read counts, backup status and recovery points from browser storage. */
   const reloadDetails = useCallback(async () => {
     const next: Record<string, ClassInfo> = {};
-    for (const candidate of workspaces) {
+    for (const candidate of await store.listWorkspaces()) {
       const bundle = await store.getBundle(candidate.id);
-      if (bundle) next[candidate.id] = { spins: bundle.spins.length, backup: backupStatus(bundle) };
+      if (bundle) next[candidate.id] = { spins: bundle.spins.length, backup: backupStatus(bundle), stamp: stampOf(bundle) };
     }
     setInfo(next);
     setRecovery(await store.listRecoveryPoints());
-  }, [store, workspaces]);
+  }, [store]);
 
+  // Also re-read whenever the list of classes on screen changes.
   useEffect(() => {
     reloadDetails().catch(() => undefined);
-  }, [reloadDetails]);
+  }, [reloadDetails, workspaces]);
+
+  /**
+   * What is on screen right now, for the storage to check a destructive action against.
+   * If another tab has logged a spin or edited a roster since, the action is refused.
+   */
+  const seen = (): SeenClasses => Object.fromEntries(Object.entries(info).map(([id, details]) => [id, details.stamp]));
 
   useEffect(() => {
     navigator.storage
@@ -112,9 +130,12 @@ export const ClassesPage = () => {
     try {
       const message = await action();
       await refresh();
+      await reloadDetails();
       if (message) setNotice({ text: message, isError: false });
     } catch (err) {
+      // Show what is really stored before reporting the problem, so a retry acts on the current version.
       await refresh().catch(() => undefined);
+      await reloadDetails().catch(() => undefined);
       setRosterNonce((n) => n + 1);
       setNotice({ text: describeError(err), isError: true });
     } finally {
@@ -146,8 +167,8 @@ export const ClassesPage = () => {
 
   const handleDeleteClass = (target: Workspace) =>
     run(async () => {
-      await deleteWorkspace(store, target.id);
       setConfirmDeleteId(null);
+      await deleteWorkspace(store, target.id, info[target.id]?.stamp ?? '');
       return `Class "${target.name}" was deleted. You can undo this under Recovery below.`;
     });
 
@@ -218,12 +239,39 @@ export const ClassesPage = () => {
 
   // --- Backup and restore ------------------------------------------------------
 
+  const classCount = (backup: BackupFile) => `${backup.workspaces.length} class${backup.workspaces.length === 1 ? '' : 'es'}`;
+
+  /**
+   * Build the backup and hand it to the browser. Nothing is recorded as backed up here:
+   * the page cannot see whether the browser saved the file, so the teacher is asked.
+   */
   const handleBackup = (ids: string[] | undefined, label: string) =>
     run(async () => {
+      setPendingBackup(null);
       const backup = await exportBackup(store, ids);
-      download(`ringwheel-backup-${fileSafe(label)}-${today()}.json`, JSON.stringify(backup, null, 2), 'application/json');
-      return `Backup downloaded (${backup.workspaces.length} class${backup.workspaces.length === 1 ? '' : 'es'}). Keep the file somewhere safe: it contains student names.`;
+      const filename = `ringwheel-backup-${fileSafe(label)}-${today()}.json`;
+      try {
+        download(filename, JSON.stringify(backup, null, 2), 'application/json');
+      } catch (err) {
+        throw new Error(`The browser did not accept the download, so no backup was recorded (${describeError(err)}). Nothing in your classes changed.`);
+      }
+      setPendingBackup({ backup, filename });
     });
+
+  const handleBackupConfirmed = () => {
+    if (!pendingBackup) return;
+    const { backup } = pendingBackup;
+    run(async () => {
+      await confirmBackup(store, backup);
+      setPendingBackup(null);
+      return `Backup recorded (${classCount(backup)}). Keep the file somewhere safe: it contains student names.`;
+    });
+  };
+
+  const handleBackupNotSaved = () => {
+    setPendingBackup(null);
+    setNotice({ text: 'No backup was recorded. Your classes are unchanged. Try the download again when you are ready.', isError: true });
+  };
 
   const handleSpinsCsv = () =>
     run(async () => {
@@ -253,7 +301,7 @@ export const ClassesPage = () => {
   const handleRestore = (restoreMode: 'add' | 'replace') => {
     if (!restoreFile) return;
     run(async () => {
-      const summary = await restoreBackup(store, restoreFile.backup, restoreMode);
+      const summary = await restoreBackup(store, restoreFile.backup, restoreMode, seen());
       setRestoreFile(null);
       const parts = [
         summary.added.length > 0 ? `Added: ${summary.added.join(', ')}.` : '',
@@ -265,7 +313,7 @@ export const ClassesPage = () => {
 
   const handleUndo = (point: RecoveryPoint) =>
     run(async () => {
-      await applyRecoveryPoint(store, point);
+      await applyRecoveryPoint(store, point, seen());
       return `Restored: ${point.bundles.map((bundle) => bundle.workspace.name).join(', ')}.`;
     });
 
@@ -276,7 +324,7 @@ export const ClassesPage = () => {
 
   const handleClearAll = () =>
     run(async () => {
-      await clearAllData(store);
+      await clearAllData(store, seen());
       saveActiveWorkspaceId('');
       setClearText('');
       return 'All RingWheel classes, rosters, history and recovery points were deleted from this browser.';
@@ -638,6 +686,25 @@ export const ClassesPage = () => {
             Roster as CSV
           </button>
         </div>
+
+        {pendingBackup && (
+          <div className="mt-3 rounded-lg border-2 border-sun bg-sun/10 p-3" role="status" data-testid="backup-confirm">
+            <p className="font-bold">Did the backup file save?</p>
+            <p className="mt-1 text-sm">
+              RingWheel handed <span className="font-mono break-all">{pendingBackup.filename}</span> ({classCount(pendingBackup.backup)}) to
+              your browser. It cannot see whether the browser actually saved it: a download can be blocked or cancelled.
+              Check your downloads folder, then answer. Until you do, no backup is recorded.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button type="button" className="btn btn-primary" onClick={handleBackupConfirmed} disabled={busy} data-testid="backup-confirm-yes">
+                Yes, I have the file
+              </button>
+              <button type="button" className="btn" onClick={handleBackupNotSaved} disabled={busy} data-testid="backup-confirm-no">
+                No, it did not save
+              </button>
+            </div>
+          </div>
+        )}
 
         <h3 className="mt-6 mb-1 text-lg font-semibold text-ember">Restore from a backup file</h3>
         <p className="mb-2 text-sm text-ink-dim">

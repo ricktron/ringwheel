@@ -4,7 +4,7 @@ import { ApiError } from '../../src/api';
 import { IndexedDbStore } from '../../src/data/local/idb-store';
 import { createLocalProvider, localDateKey } from '../../src/data/local/provider';
 import { parseBackupText } from '../../src/data/local/schema';
-import { MemoryStore, type WorkspaceStore } from '../../src/data/local/store';
+import { MemoryStore, StoreConflictError, stampOf, type WorkspaceStore } from '../../src/data/local/store';
 import {
   DEFAULT_WORKSPACE_NAME,
   addStudents,
@@ -12,6 +12,7 @@ import {
   applyRecoveryPoint,
   backupStatus,
   clearAllData,
+  confirmBackup,
   deleteWorkspace,
   describeBackup,
   ensureWorkspace,
@@ -20,6 +21,7 @@ import {
   removeStudent,
   renameWorkspace,
   restoreBackup,
+  seenClasses,
   updateStudent,
 } from '../../src/data/local/workspaces';
 import { MODE_KEY, resolveStorageMode } from '../../src/data/mode';
@@ -28,12 +30,16 @@ import { saveGuarded } from '../../src/utils/sheet-save';
 import { buildLocalQueue } from '../../src/utils/roster';
 import { createRng, spin } from '../../src/utils/spin-engine';
 import { buildSpinLogPayload } from '../../src/utils/spin-log';
-import { sampleBundle } from './fixtures';
+import { sampleBundle, sampleSpins } from './fixtures';
 
 const stores: [string, () => Promise<WorkspaceStore>][] = [
   ['MemoryStore', async () => new MemoryStore()],
   ['IndexedDbStore', async () => IndexedDbStore.open(new IDBFactory())],
 ];
+
+/** What a dump looks like after coming back from a backup file built at `exportedAt`. */
+const fromFileAt = (bundles: Awaited<ReturnType<typeof dump>>, exportedAt: string) =>
+  bundles.map((bundle) => ({ ...bundle!, workspace: { ...bundle!.workspace, lastBackupAt: exportedAt } }));
 
 /** Everything in a store, in a form that can be compared. */
 async function dump(store: WorkspaceStore) {
@@ -122,15 +128,15 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
   it('full round trip: back up, delete everything, restore, and get identical data back', async () => {
     const { store } = await seeded();
     const backup = await exportBackup(store, undefined, new Date('2026-11-24T18:00:00.000Z'));
-    const expected = await dump(store);
+    const expected = fromFileAt(await dump(store), '2026-11-24T18:00:00.000Z');
     const text = JSON.stringify(backup);
 
-    await clearAllData(store);
+    await clearAllData(store, await seenClasses(store));
     expect(await store.listWorkspaces()).toEqual([]);
 
     const parsed = parseBackupText(text);
     if (!parsed.ok) throw new Error(parsed.errors.join(' '));
-    const summary = await restoreBackup(store, parsed.backup, 'replace');
+    const summary = await restoreBackup(store, parsed.backup, 'replace', await seenClasses(store));
     expect(summary).toEqual({ added: ['Period 3', 'Period 5'], replaced: [], recoveryPointId: null });
     expect(await dump(store)).toEqual(expected);
 
@@ -143,9 +149,9 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
   it('"add" into an empty browser brings every class back exactly, ids included', async () => {
     const { store } = await seeded();
     const backup = await exportBackup(store, undefined, new Date('2026-11-24T18:00:00.000Z'));
-    const expected = await dump(store);
-    await clearAllData(store);
-    const summary = await restoreBackup(store, backup, 'add');
+    const expected = fromFileAt(await dump(store), '2026-11-24T18:00:00.000Z');
+    await clearAllData(store, await seenClasses(store));
+    const summary = await restoreBackup(store, backup, 'add', await seenClasses(store));
     expect(summary).toEqual({ added: ['Period 3', 'Period 5'], replaced: [], recoveryPointId: null });
     expect(await dump(store)).toEqual(expected);
   });
@@ -153,12 +159,12 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
   it('a restore into a brand-new browser replaces the empty starter class instead of leaving it behind', async () => {
     const { store } = await seeded();
     const backup = await exportBackup(store, undefined, new Date('2026-11-24T18:00:00.000Z'));
-    const expected = await dump(store);
+    const expected = fromFileAt(await dump(store), '2026-11-24T18:00:00.000Z');
 
     for (const mode of ['add', 'replace'] as const) {
-      await clearAllData(store);
+      await clearAllData(store, await seenClasses(store));
       await ensureWorkspace(store); // what the app does on start-up
-      const summary = await restoreBackup(store, backup, mode);
+      const summary = await restoreBackup(store, backup, mode, await seenClasses(store));
       expect(summary).toEqual({ added: ['Period 3', 'Period 5'], replaced: [], recoveryPointId: null });
       expect(await dump(store)).toEqual(expected);
       expect(await store.listRecoveryPoints()).toEqual([]);
@@ -172,7 +178,7 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
     const other = sampleBundle('From a backup', ['Dee Fixture'], 1);
     const backup = { format: 'ringwheel-backup' as const, formatVersion: 1, exportedAt: '2026-11-24T18:00:00.000Z', workspaces: [other] };
 
-    await restoreBackup(fresh, backup, 'add');
+    await restoreBackup(fresh, backup, 'add', await seenClasses(fresh));
     expect((await fresh.listWorkspaces()).map((w) => w.name).sort()).toEqual(['From a backup', DEFAULT_WORKSPACE_NAME].sort());
     expect(await fresh.listSpins(starter.id)).toHaveLength(1);
 
@@ -183,13 +189,58 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
     expect(isUntouchedStarter({ ...other.workspace, students: [] }, 0)).toBe(false);
   });
 
-  it('exporting records the backup time and does not otherwise change the class', async () => {
+  it('building a backup file changes nothing at all: no backup is recorded until the teacher confirms they have the file', async () => {
+    const { store, a } = await seeded();
+    const before = await dump(store);
+    const backup = await exportBackup(store, [a.workspace.id], new Date('2026-11-24T18:00:00.000Z'));
+    expect(backup.exportedAt).toBe('2026-11-24T18:00:00.000Z');
+    expect(backup.workspaces).toEqual([a]);
+    // The download may still be blocked, cancelled or fail. Storage must not claim otherwise.
+    expect(await dump(store)).toEqual(before);
+    expect(backupStatus((await store.getBundle(a.workspace.id))!).state).toBe('never');
+  });
+
+  it('a confirmed backup is recorded at the time the file was built, for the classes in the file only', async () => {
+    const { store, a, b } = await seeded();
+    const backup = await exportBackup(store, [a.workspace.id], new Date('2026-11-24T18:00:00.000Z'));
+
+    // The teacher keeps working before answering "do you have the file?".
+    const later = sampleSpins(a.workspace, 1, '2026-11-24T18:05:00.000Z')[0];
+    await store.appendSpin(later);
+
+    await confirmBackup(store, backup);
+    const after = (await store.getBundle(a.workspace.id))!;
+    expect(after.workspace).toEqual({ ...a.workspace, lastBackupAt: '2026-11-24T18:00:00.000Z' });
+    // The spin logged after the file was built is correctly shown as not backed up.
+    expect(backupStatus(after)).toMatchObject({ state: 'stale', spinsSince: 1 });
+    expect((await store.getWorkspace(b.workspace.id))!.lastBackupAt).toBeNull();
+
+    // Confirming an older file later does not move the backup time backwards.
+    await confirmBackup(store, { ...backup, exportedAt: '2026-11-20T00:00:00.000Z' });
+    expect((await store.getWorkspace(a.workspace.id))!.lastBackupAt).toBe('2026-11-24T18:00:00.000Z');
+  });
+
+  it('a spin stamped before the file was built but stored after it is not counted as backed up', async () => {
     const { store, a } = await seeded();
     const backup = await exportBackup(store, [a.workspace.id], new Date('2026-11-24T18:00:00.000Z'));
-    expect(backup.workspaces).toHaveLength(1);
-    expect(backup.workspaces[0].workspace.lastBackupAt).toBe('2026-11-24T18:00:00.000Z');
-    const after = await store.getBundle(a.workspace.id);
-    expect(after).toEqual({ workspace: { ...a.workspace, lastBackupAt: '2026-11-24T18:00:00.000Z' }, spins: a.spins });
+    // Another tab's wheel stopped at 17:59:59.500 and its save reached storage after the file was built.
+    const straggler = sampleSpins(a.workspace, 1, '2026-11-24T17:59:59.500Z')[0];
+    await store.appendSpin(straggler);
+
+    await confirmBackup(store, backup);
+    const after = (await store.getBundle(a.workspace.id))!;
+    expect(after.workspace.lastBackupAt).toBe('2026-11-24T17:59:59.499Z');
+    expect(backupStatus(after)).toMatchObject({ state: 'stale', spinsSince: 1 });
+  });
+
+  it('a class restored from a file counts as backed up as of that file', async () => {
+    const { store, a } = await seeded();
+    const backup = await exportBackup(store, [a.workspace.id], new Date('2026-11-24T18:00:00.000Z'));
+    expect(backup.workspaces[0].workspace.lastBackupAt).toBeNull();
+    await restoreBackup(store, backup, 'replace', await seenClasses(store));
+    const restored = (await store.getBundle(a.workspace.id))!;
+    expect(restored.workspace.lastBackupAt).toBe('2026-11-24T18:00:00.000Z');
+    expect(backupStatus(restored).state).toBe('current');
   });
 
   it('"add" never touches what is already there, even when restoring a backup of the same class', async () => {
@@ -197,7 +248,7 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
     const backup = await exportBackup(store, [a.workspace.id]);
     const before = await dump(store);
 
-    const summary = await restoreBackup(store, backup, 'add');
+    const summary = await restoreBackup(store, backup, 'add', await seenClasses(store));
     expect(summary.added).toEqual(['Period 3 (2)']);
     expect(summary.replaced).toEqual([]);
 
@@ -224,7 +275,7 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
     await createLocalProvider(store, current.id).logSpin(payloadFor('later', current.students[0], '2026-11-25T15:00:00.000Z'), { studentId: current.students[0].id });
     const afterMoreWork = await store.getBundle(a.workspace.id);
 
-    const summary = await restoreBackup(store, backup, 'replace', new Date('2026-11-25T16:00:00.000Z'));
+    const summary = await restoreBackup(store, backup, 'replace', await seenClasses(store), new Date('2026-11-25T16:00:00.000Z'));
     expect(summary.replaced).toEqual(['Period 3']);
     expect(summary.added).toEqual([]);
     const restored = (await store.getBundle(a.workspace.id))!;
@@ -240,8 +291,11 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
     expect(points[0].bundles).toEqual([afterMoreWork]);
 
     // Undo: the later work is back, and the undo itself left a recovery copy.
-    await applyRecoveryPoint(store, points[0], new Date('2026-11-25T17:00:00.000Z'));
-    expect(await store.getBundle(a.workspace.id)).toEqual(afterMoreWork);
+    await applyRecoveryPoint(store, points[0], await seenClasses(store), new Date('2026-11-25T17:00:00.000Z'));
+    // Identical content, with the revision moved past every earlier version so no stale tab can edit over it.
+    const undone = (await store.getBundle(a.workspace.id))!;
+    expect(undone).toEqual({ workspace: { ...afterMoreWork!.workspace, rev: 4 }, spins: afterMoreWork!.spins });
+    await expect(removeStudent(store, afterMoreWork!.workspace, afterMoreWork!.workspace.students[0].id)).rejects.toBeInstanceOf(StoreConflictError);
     const afterUndo = await store.listRecoveryPoints();
     expect(afterUndo).toHaveLength(1);
     expect(afterUndo[0].reason).toBe('Before undoing: restoring a backup over "Period 3"');
@@ -257,16 +311,16 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
     backup.workspaces[1].workspace.id = 'brand-new-id';
     backup.workspaces[1].spins.forEach((s) => (s.workspaceId = 'brand-new-id'));
     backup.workspaces = [backup.workspaces[1]];
-    await expect(restoreBackup(store, backup, 'replace')).rejects.toThrow();
+    await expect(restoreBackup(store, backup, 'replace', await seenClasses(store))).rejects.toThrow();
     expect(await dump(store)).toEqual(before);
   });
 
   it('deleting a class keeps a recovery copy that restores it exactly', async () => {
     const { store, a, b } = await seeded();
-    const point = await deleteWorkspace(store, a.workspace.id, new Date('2026-11-24T19:00:00.000Z'));
+    const point = await deleteWorkspace(store, a.workspace.id, stampOf(a), new Date('2026-11-24T19:00:00.000Z'));
     expect((await store.listWorkspaces()).map((w) => w.name)).toEqual(['Period 5']);
     expect(point!.reason).toBe('Before deleting "Period 3"');
-    await applyRecoveryPoint(store, point!);
+    await applyRecoveryPoint(store, point!, await seenClasses(store));
     expect(await store.getBundle(a.workspace.id)).toEqual(a);
     expect(await store.getBundle(b.workspace.id)).toEqual(b);
     expect(await store.listRecoveryPoints()).toEqual([]);
@@ -274,8 +328,8 @@ describe.each(stores)('backup and restore (%s)', (_name, open) => {
 
   it('delete-everything really deletes everything, recovery copies included', async () => {
     const { store, a } = await seeded();
-    await deleteWorkspace(store, a.workspace.id);
-    await clearAllData(store);
+    await deleteWorkspace(store, a.workspace.id, stampOf(a));
+    await clearAllData(store, await seenClasses(store));
     expect(await store.listWorkspaces()).toEqual([]);
     expect(await store.listRecoveryPoints()).toEqual([]);
   });
@@ -289,19 +343,24 @@ describe('backup status', () => {
     const status = async () => backupStatus((await store.getBundle(bundle.workspace.id))!);
 
     expect(await status()).toEqual({ state: 'never', lastBackupAt: null, spinsSince: 2, rosterChangedSince: true });
-    expect(describeBackup(await status())).toBe('Never backed up');
+    expect(describeBackup(await status())).toBe('No confirmed backup');
 
-    await exportBackup(store, undefined, new Date());
+    // Building the file is not a backup. A blocked or cancelled download ends here, and the status must not move.
+    const backup = await exportBackup(store, undefined, new Date());
+    expect(await status()).toEqual({ state: 'never', lastBackupAt: null, spinsSince: 2, rosterChangedSince: true });
+    expect(describeBackup(await status())).toBe('No confirmed backup');
+
+    await confirmBackup(store, backup);
     expect((await status()).state).toBe('current');
-    expect(describeBackup(await status())).toBe('Backed up today');
+    expect(describeBackup(await status())).toBe('Last confirmed backup: today');
 
     await createLocalProvider(store, bundle.workspace.id).logSpin(payloadFor('new', null, new Date(Date.now() + 1000).toISOString()));
     expect(await status()).toMatchObject({ state: 'stale', spinsSince: 1, rosterChangedSince: false });
-    expect(describeBackup(await status())).toBe('Not in a backup yet: 1 spin');
+    expect(describeBackup(await status())).toBe('Not in a confirmed backup: 1 spin');
 
     await new Promise((resolve) => setTimeout(resolve, 5));
     await addStudents(store, (await store.getWorkspace(bundle.workspace.id))!, [{ name: 'Ben Placeholder', email: '' }]);
-    expect(describeBackup(await status())).toBe('Not in a backup yet: 1 spin and roster or settings changes');
+    expect(describeBackup(await status())).toBe('Not in a confirmed backup: 1 spin and roster or settings changes');
   });
 });
 
@@ -410,7 +469,7 @@ describe('local data provider', () => {
 
   it('reports a clear failure, not success, when the class is gone or storage fails', async () => {
     const { provider, store, workspace } = await setup();
-    await store.deleteWorkspace(workspace.id);
+    await deleteWorkspace(store, workspace.id, (await seenClasses(store))[workspace.id]);
     await expect(provider.logSpin(payloadFor('x', null, new Date().toISOString()))).rejects.toMatchObject({ kind: 'rejected' });
     await expect(provider.health()).rejects.toMatchObject({ kind: 'rejected' });
     await expect(provider.writeSettings([])).rejects.toMatchObject({ kind: 'rejected' });

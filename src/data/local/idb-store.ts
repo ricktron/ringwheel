@@ -18,6 +18,10 @@ import {
   StoreMissingError,
   applyWorkspaceChange,
   byName,
+  checkClearAll,
+  planClassChange,
+  type ClassChange,
+  type ClassChangeResult,
   type RecoveryPoint,
   type WorkspaceStore,
 } from './store';
@@ -51,6 +55,11 @@ export class IndexedDbStore implements WorkspaceStore {
     this.db = db;
     // If another tab upgrades the database, let go of it instead of blocking that tab.
     db.onversionchange = () => db.close();
+  }
+
+  /** Let go of the database. Only needed by code that opens extra connections, such as tests. */
+  close(): void {
+    this.db.close();
   }
 
   static open(factory: IDBFactory, name = DB_NAME): Promise<IndexedDbStore> {
@@ -144,7 +153,9 @@ export class IndexedDbStore implements WorkspaceStore {
       const store = tx.objectStore('workspaces');
       for (const id of ids) {
         const current = await request(store.get(id));
-        if (current) await request(store.put({ ...current, lastBackupAt: at }));
+        if (current && (!current.lastBackupAt || current.lastBackupAt < at)) {
+          await request(store.put({ ...current, lastBackupAt: at }));
+        }
       }
     });
   }
@@ -164,13 +175,16 @@ export class IndexedDbStore implements WorkspaceStore {
     });
   }
 
+  /** Read a class and its spins inside an existing transaction. */
+  private async readBundle(tx: IDBTransaction, id: string): Promise<WorkspaceBundle | null> {
+    const workspace = await request(tx.objectStore('workspaces').get(id));
+    if (!workspace) return null;
+    const spins = (await request(tx.objectStore('spins').index('workspaceId').getAll(id))) as LocalSpin[];
+    return { workspace: asWorkspace(workspace), spins: spins.sort((a, b) => a.timestamp_iso.localeCompare(b.timestamp_iso)) };
+  }
+
   getBundle(id: string) {
-    return this.transact(['workspaces', 'spins'], 'readonly', async (tx) => {
-      const workspace = await request(tx.objectStore('workspaces').get(id));
-      if (!workspace) return null;
-      const spins = (await request(tx.objectStore('spins').index('workspaceId').getAll(id))) as LocalSpin[];
-      return { workspace: asWorkspace(workspace), spins: spins.sort((a, b) => a.timestamp_iso.localeCompare(b.timestamp_iso)) };
-    });
+    return this.transact(['workspaces', 'spins'], 'readonly', (tx) => this.readBundle(tx, id));
   }
 
   private async removeWorkspace(tx: IDBTransaction, id: string) {
@@ -179,24 +193,61 @@ export class IndexedDbStore implements WorkspaceStore {
     for (const key of keys) await request(tx.objectStore('spins').delete(key));
   }
 
-  putBundles(bundles: WorkspaceBundle[], { replace = [] }: { replace?: string[] } = {}) {
+  /** add() rejects an id that is already in use, and a rejection aborts the whole transaction. */
+  private async addBundles(tx: IDBTransaction, bundles: WorkspaceBundle[]) {
+    for (const { workspace, spins } of bundles) {
+      await request(tx.objectStore('workspaces').add(workspace));
+      for (const spin of spins) await request(tx.objectStore('spins').add(spin));
+    }
+  }
+
+  putBundles(bundles: WorkspaceBundle[]) {
     return this.transact(['workspaces', 'spins'], 'readwrite', async (tx) => {
       const ids = new Set<string>();
       for (const { workspace } of bundles) {
         if (ids.has(workspace.id)) throw new Error('The same class appears twice.');
         ids.add(workspace.id);
       }
-      for (const id of replace) await this.removeWorkspace(tx, id);
-      // add() rejects any remaining id collision, and a rejection aborts everything above.
-      for (const { workspace, spins } of bundles) {
-        await request(tx.objectStore('workspaces').add(workspace));
-        for (const spin of spins) await request(tx.objectStore('spins').add(spin));
-      }
+      await this.addBundles(tx, bundles);
     });
   }
 
-  deleteWorkspace(id: string) {
-    return this.transact(['workspaces', 'spins'], 'readwrite', (tx) => this.removeWorkspace(tx, id));
+  /**
+   * One transaction over all three stores. IndexedDB runs transactions that
+   * touch the same stores one after another, so a spin or roster edit from
+   * another tab lands either wholly before this (and the stamp check then
+   * refuses the change) or wholly after it. It can never fall in between the
+   * check, the recovery copy and the removal.
+   */
+  replaceClasses(change: ClassChange): Promise<ClassChangeResult> {
+    return this.transact(['workspaces', 'spins', 'recovery'], 'readwrite', async (tx) => {
+      const current = new Map<string, WorkspaceBundle>();
+      for (const { id } of change.remove) {
+        const bundle = await this.readBundle(tx, id);
+        if (bundle) current.set(id, bundle);
+      }
+      const occupied = new Set<string>();
+      for (const { workspace } of change.put) {
+        if ((await request(tx.objectStore('workspaces').getKey(workspace.id))) !== undefined) occupied.add(workspace.id);
+      }
+      const recovery = tx.objectStore('recovery');
+      const pointExists = change.consumeRecoveryPointId
+        ? (await request(recovery.getKey(change.consumeRecoveryPointId))) !== undefined
+        : false;
+
+      // Throws, which aborts the transaction, if anything is not as the caller expected.
+      const plan = planClassChange(change, current, occupied, pointExists);
+
+      if (plan.recoveryPoint) {
+        await request(recovery.put(plan.recoveryPoint));
+        const points = ((await request(recovery.getAll())) as RecoveryPoint[]).sort((a, b) => b.takenAt.localeCompare(a.takenAt));
+        for (const old of points.slice(MAX_RECOVERY_POINTS)) await request(recovery.delete(old.id));
+      }
+      for (const { id } of change.remove) await this.removeWorkspace(tx, id);
+      await this.addBundles(tx, plan.put);
+      if (change.consumeRecoveryPointId) await request(recovery.delete(change.consumeRecoveryPointId));
+      return { removed: plan.removed, recoveryPoint: plan.recoveryPoint };
+    });
   }
 
   listRecoveryPoints() {
@@ -221,8 +272,16 @@ export class IndexedDbStore implements WorkspaceStore {
     });
   }
 
-  clearAll() {
+  clearAll(expected?: Record<string, string>) {
     return this.transact(['workspaces', 'spins', 'recovery'], 'readwrite', async (tx) => {
+      if (expected) {
+        const current: WorkspaceBundle[] = [];
+        for (const key of await request(tx.objectStore('workspaces').getAllKeys())) {
+          const bundle = await this.readBundle(tx, String(key));
+          if (bundle) current.push(bundle);
+        }
+        checkClearAll(expected, current);
+      }
       await request(tx.objectStore('workspaces').clear());
       await request(tx.objectStore('spins').clear());
       await request(tx.objectStore('recovery').clear());

@@ -1,6 +1,6 @@
 # Local Mode and Connected Mode
 
-Date: 2026-11-24
+Date: 2026-11-24. Updated 2026-11-25 (destructive actions are checked and atomic; backups are recorded only on confirmation).
 
 RingWheel keeps classroom data in one of two places. The app always says which one is in
 charge, on every page.
@@ -68,7 +68,7 @@ IndexedDB database `ringwheel`, version 1:
 | --- | --- | --- |
 | `workspaces` | `id` | One record per class: name, roster, settings, ring weights, revision, last backup time |
 | `spins` | `id` (index: `workspaceId`) | One record per spin. Append-only. |
-| `recovery` | `id` | Copies taken before a class is deleted or replaced. The newest five are kept. |
+| `recovery` | `id` | Copies taken when a class is deleted or replaced, in the same step as the deletion or replacement. The newest five are kept. |
 
 ```ts
 interface Workspace {
@@ -81,7 +81,7 @@ interface Workspace {
   students: LocalStudent[];
   settings: SettingRow[];  // same rows as the Settings sheet
   rings: RingSlice[];      // same rows as the Rings sheet
-  lastBackupAt: string | null;
+  lastBackupAt: string | null;  // when the newest backup file the teacher confirmed (or restored from) was built
 }
 
 interface LocalStudent {
@@ -107,6 +107,41 @@ both the in-memory store and the real IndexedDB code):
   tab holding an older copy is refused instead of overwriting.
 - Importing, replacing, deleting and clearing are all-or-nothing.
 - Classes never share students, settings or history.
+- Deleting a class, replacing one from a backup, undoing either, and "delete everything" all go
+  through one storage call (`replaceClasses`, or `clearAll` with the classes the page showed).
+  See the next section.
+
+### Destructive actions and other tabs
+
+A teacher can have RingWheel open in two tabs: one on the Classes page, one spinning. The risk
+is that a spin or a roster edit made in one tab lands between the moment the other tab reads a
+class and the moment it deletes or replaces it. The rules that close that gap:
+
+1. **Every destructive action says what the teacher was looking at.** The Classes page keeps a
+   fingerprint (`stampOf`) of each class as it last showed it and sends it with the action.
+2. **The fingerprint covers the spin history, not only the revision.** It is built from the
+   revision, the last edit time, the number of spins and a hash of the spin ids. Logging a spin
+   does not move the revision, so the revision alone would miss it.
+3. **Check, recovery copy and change are one step.** In IndexedDB that is one read-write
+   transaction over the `workspaces`, `spins` and `recovery` stores. The browser runs
+   transactions on the same stores one after another, so a write from another tab is either
+   wholly before the step (the fingerprint no longer matches and the action is refused) or
+   wholly after it. The in-memory store does the same work with no pause in the middle.
+4. **A refusal changes nothing.** No class is removed, no class from a backup file is added, no
+   recovery copy is written, and a recovery copy being used for an undo is not used up. The
+   page says which class changed, shows the current version, and the teacher can try again.
+5. **The recovery copy is the class as it was at that instant**, read inside the same step, so
+   it always includes the newest spin.
+6. **A replaced class gets a revision above the one it replaced.** A tab still holding the old
+   version gets the normal "changed in another tab" refusal instead of editing over the
+   restored class. A revision that is already higher is kept, so a restore into an empty
+   browser is still an exact copy.
+7. A spin logged to a class that has just been deleted is refused and shown as NOT SAVED. It is
+   never dropped silently.
+
+Covered by `tests/local/concurrency-scenarios.ts`. The same scenarios run against the in-memory
+store and the IndexedDB code in `npm test`, and against Chromium's real IndexedDB in
+`npm run test:e2e`, which also drives two real tabs through the Classes page.
 
 ### Changing the schema later
 
@@ -121,12 +156,32 @@ Everything is on the Classes page.
 
 | Action | What it does |
 | --- | --- |
-| Back up a class / all classes | Downloads one JSON file with the complete roster, settings and spin history |
+| Back up a class / all classes | Hands the browser one JSON file with the complete roster, settings and spin history, then asks whether the file saved |
 | Restore > Add | Adds the classes in the file. Nothing already in the browser is changed. A class that already exists is added beside it as a copy. |
-| Restore > Replace | Replaces a class with the same id. A copy of the current version is kept under Recovery first. |
+| Restore > Replace | Replaces a class with the same id. A copy of the replaced version is kept under Recovery as part of the same step. Refused if the class changed in another tab after the page showed it. |
 | Recovery > Put it back | Undoes a delete or a replace. The undo is itself undoable. |
 | Spin history as CSV / Roster as CSV | Ordinary spreadsheets for classroom records |
 | Delete everything | Requires typing DELETE. Removes all classes, history and recovery copies. Not undoable. |
+
+### What "backed up" means
+
+RingWheel cannot see the downloads folder. A browser can block a download, the teacher can
+cancel the save dialog, and a disk can be full, and the page is told none of this. So:
+
+- Building the file and handing it to the browser records nothing.
+- The page then asks "Did the backup file save?". Only "Yes, I have the file" records a backup.
+  "No, it did not save", closing the tab, or reloading records nothing.
+- If the browser refuses the download outright, the page says so and records nothing.
+- The time recorded is when the file's contents were read, not when the button was pressed.
+  Anything done after that still shows as not backed up. A spin that was stamped before the
+  file was built but stored just after it is also treated as not backed up.
+- A class restored from a file counts as backed up as of that file.
+- A backup time never moves backwards.
+
+The status line therefore reads "No confirmed backup", "Last confirmed backup: today", or
+"Not in a confirmed backup: 2 spins and roster or settings changes". "Confirmed" means the
+teacher said they have the file. It is not a claim that RingWheel verified the file on disk,
+and it cannot know whether the file was later moved or deleted.
 
 Guarantees, each covered by a test:
 
@@ -134,6 +189,9 @@ Guarantees, each covered by a test:
   anywhere rejects the whole file and changes nothing.
 - Back up, delete everything, restore: the data is identical, including ids, selections,
   timestamps, seeds and flags.
+- A delete, replace or undo is refused, with nothing changed, if the class is no longer what
+  the page showed. See "Destructive actions and other tabs" above.
+- A backup is recorded only on the teacher's confirmation, never by the download starting.
 - Exported CSV cells that a spreadsheet would treat as a formula are neutralized.
 - A CSV import shows what would be added and what would be skipped, and why, before adding.
 - The same student is recognized by email when both entries have one, otherwise by name.
@@ -149,8 +207,8 @@ Guarantees, each covered by a test:
   The page cannot send data even to its own host.
 - **Browser storage is not a backup.** Clearing site data, a private window, another browser or
   another computer will not have it, and a browser low on space may remove it. The Classes page
-  says this, shows when each class was last backed up, and warns when the browser is not
-  keeping data at all.
+  says this, shows the last backup the teacher confirmed for each class, and warns when the
+  browser is not keeping data at all.
 - Backup files contain student names. Store them as you would a gradebook.
 
 ## Differences between the modes that are intentional

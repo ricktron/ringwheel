@@ -1,9 +1,12 @@
 /**
  * Operations on Local Mode data: classes, rosters, backups, restores.
  *
- * Every destructive operation here first stores a recovery point, so it can be
- * undone from the Classes page. The one exception is `clearAllData`, which is
- * the explicit "delete everything" action and removes recovery points too.
+ * Every destructive operation here keeps a recovery point, so it can be undone
+ * from the Classes page. The recovery point is taken by the store in the same
+ * all-or-nothing step as the deletion or replacement itself, and only after
+ * the store has confirmed the class is still what the teacher was looking at.
+ * The one exception is `clearAllData`, which is the explicit "delete
+ * everything" action and removes recovery points too.
  */
 import type { RosterCandidate } from './csv';
 import {
@@ -16,7 +19,7 @@ import {
   type Workspace,
   type WorkspaceBundle,
 } from './schema';
-import type { RecoveryPoint, WorkspaceStore } from './store';
+import { stampOf, type ClassRemoval, type RecoveryPoint, type WorkspaceStore } from './store';
 
 export const DEFAULT_WORKSPACE_NAME = 'My class';
 
@@ -107,31 +110,62 @@ export function removeStudent(store: WorkspaceStore, workspace: Workspace, stude
 // Backup, restore, delete
 // ---------------------------------------------------------------------------
 
-async function bundlesFor(store: WorkspaceStore, ids: string[]): Promise<WorkspaceBundle[]> {
-  const bundles: WorkspaceBundle[] = [];
-  for (const id of ids) {
-    const bundle = await store.getBundle(id);
-    if (bundle) bundles.push(bundle);
+/**
+ * What the teacher was looking at when they pressed a button: class id to
+ * `stampOf` that class. Every destructive action carries this, and the store
+ * refuses the action if a class no longer matches (a spin was logged, the
+ * roster was edited, the class was deleted, or a new one appeared).
+ */
+export type SeenClasses = Record<string, string>;
+
+/** Read what is stored right now, in the form the destructive actions expect. */
+export async function seenClasses(store: WorkspaceStore): Promise<SeenClasses> {
+  const seen: SeenClasses = {};
+  for (const workspace of await store.listWorkspaces()) {
+    const bundle = await store.getBundle(workspace.id);
+    if (bundle) seen[workspace.id] = stampOf(bundle);
   }
-  return bundles;
+  return seen;
 }
 
 /**
- * Build a complete backup of the given classes (all classes when none are named)
- * and record that they were backed up.
+ * Build a complete backup of the given classes (all classes when none are named).
+ *
+ * This only reads. It does NOT record that a backup exists: building the file
+ * is not the same as the teacher having it. `confirmBackup` records that.
  */
 export async function exportBackup(store: WorkspaceStore, ids?: string[], now: Date = new Date()): Promise<BackupFile> {
+  // `now` is fixed before anything is read, so a change that lands while the
+  // file is being built can only ever count as "not in the backup".
   const wanted = ids ?? (await store.listWorkspaces()).map((workspace) => workspace.id);
-  const stamp = now.toISOString();
-  await store.markBackedUp(wanted, stamp);
-  return buildBackup(await bundlesFor(store, wanted), now);
+  const bundles: WorkspaceBundle[] = [];
+  for (const id of wanted) {
+    const bundle = await store.getBundle(id);
+    if (bundle) bundles.push(bundle);
+  }
+  return buildBackup(bundles, now);
 }
 
-async function saveRecoveryPoint(store: WorkspaceStore, reason: string, bundles: WorkspaceBundle[], now: Date): Promise<RecoveryPoint | null> {
-  if (bundles.length === 0) return null;
-  const point: RecoveryPoint = { id: newId(), takenAt: now.toISOString(), reason, bundles };
-  await store.addRecoveryPoint(point);
-  return point;
+/**
+ * Record that the teacher has this backup file. Call it only once they have
+ * said so (or the file was read back from their disk).
+ *
+ * The time recorded is the time the file's contents were read, never the time
+ * of confirmation, so anything that happened after the file was built still
+ * shows as not backed up. A class's backup time never moves backwards.
+ */
+export async function confirmBackup(store: WorkspaceStore, backup: BackupFile): Promise<void> {
+  for (const saved of backup.workspaces) {
+    const current = await store.getBundle(saved.workspace.id);
+    if (!current) continue;
+    // A spin is stamped when the wheel stops and stored a moment later. One that was
+    // stamped before the file was built but stored after it is not in the file, so the
+    // backup time is pulled back to just before it.
+    const inFile = new Set(saved.spins.map((spin) => spin.id));
+    const missed = current.spins.find((spin) => !inFile.has(spin.id) && spin.timestamp_iso <= backup.exportedAt);
+    const at = missed ? new Date(Date.parse(missed.timestamp_iso) - 1).toISOString() : backup.exportedAt;
+    await store.markBackedUp([saved.workspace.id], at);
+  }
 }
 
 /** Give a class and all of its spins fresh ids, so it can sit beside the original. */
@@ -152,6 +186,8 @@ function uniqueName(name: string, taken: Set<string>): string {
   }
 }
 
+const quoted = (bundles: WorkspaceBundle[]): string => bundles.map((bundle) => `"${bundle.workspace.name}"`).join(', ');
+
 export interface RestoreSummary {
   added: string[];
   replaced: string[];
@@ -166,26 +202,45 @@ export interface RestoreSummary {
  * the file is added beside it as a copy.
  *
  * mode "replace": a class in the file replaces the class with the same id in
- * this browser. A recovery point holding the replaced classes is stored first.
- * Classes in the file that do not exist here are added.
+ * this browser. The replaced classes go into a recovery point as part of the
+ * same step. Classes in the file that do not exist here are added.
+ *
+ * `seen` is what the teacher was shown. If any class involved has changed
+ * since (including a spin logged from another tab) the restore is refused
+ * with a StoreConflictError and nothing at all is changed.
  */
 export async function restoreBackup(
   store: WorkspaceStore,
   backup: BackupFile,
   mode: 'add' | 'replace',
+  seen: SeenClasses,
   now: Date = new Date()
 ): Promise<RestoreSummary> {
-  const all = await store.listWorkspaces();
   // The empty starter class is not teacher data. It steps aside for a restore.
-  const starter = all.find((workspace) => workspace.id === DEFAULT_WORKSPACE_ID);
-  const starterIsUntouched = starter ? isUntouchedStarter(starter, (await store.listSpins(starter.id)).length) : false;
-  const existing = starterIsUntouched ? all.filter((workspace) => workspace.id !== DEFAULT_WORKSPACE_ID) : all;
-  const drop = starterIsUntouched ? [DEFAULT_WORKSPACE_ID] : [];
-  const existingIds = new Set(existing.map((workspace) => workspace.id));
-  const names = new Set(existing.map((workspace) => workspace.name));
+  // Its removal is checked like any other: if it gained a student or a spin
+  // since the teacher looked, the stamp no longer matches and nothing happens.
+  const starter = seen[DEFAULT_WORKSPACE_ID] ? await store.getBundle(DEFAULT_WORKSPACE_ID) : null;
+  const dropStarter = starter !== null && isUntouchedStarter(starter.workspace, starter.spins.length);
+  const existingIds = new Set(Object.keys(seen).filter((id) => !(dropStarter && id === DEFAULT_WORKSPACE_ID)));
+  const names = new Set((await store.listWorkspaces()).filter((workspace) => existingIds.has(workspace.id)).map((workspace) => workspace.name));
+  const starterRemoval: ClassRemoval[] = dropStarter
+    ? [{ id: DEFAULT_WORKSPACE_ID, expected: seen[DEFAULT_WORKSPACE_ID], recover: false }]
+    : [];
+
+  // The teacher is holding a file with exactly this content, so the restored classes are backed up as of that file.
+  const fromFile = backup.workspaces.map((bundle) => ({
+    ...bundle,
+    workspace: {
+      ...bundle.workspace,
+      lastBackupAt:
+        bundle.workspace.lastBackupAt && bundle.workspace.lastBackupAt > backup.exportedAt
+          ? bundle.workspace.lastBackupAt
+          : backup.exportedAt,
+    },
+  }));
 
   if (mode === 'add') {
-    const bundles = backup.workspaces.map((bundle) => {
+    const bundles = fromFile.map((bundle) => {
       // A class that is not in this browser comes back exactly as it was saved.
       // One that is already here is added as a separate copy under new ids.
       if (!existingIds.has(bundle.workspace.id)) {
@@ -196,51 +251,61 @@ export async function restoreBackup(
       names.add(name);
       return withNewIds(bundle, name);
     });
-    await store.putBundles(bundles, { replace: drop });
+    await store.replaceClasses({ remove: starterRemoval, put: bundles });
     return { added: bundles.map((bundle) => bundle.workspace.name), replaced: [], recoveryPointId: null };
   }
 
-  const replaceIds = backup.workspaces.map((bundle) => bundle.workspace.id).filter((id) => existingIds.has(id));
-  const replacedBundles = await bundlesFor(store, replaceIds);
-  const point = await saveRecoveryPoint(
-    store,
-    `Before restoring a backup over ${replacedBundles.map((bundle) => `"${bundle.workspace.name}"`).join(', ')}`,
-    replacedBundles,
-    now
-  );
-  await store.putBundles(backup.workspaces, { replace: [...replaceIds, ...drop] });
+  const replaceIds = new Set(fromFile.map((bundle) => bundle.workspace.id).filter((id) => existingIds.has(id)));
+  const result = await store.replaceClasses({
+    remove: [...[...replaceIds].map((id) => ({ id, expected: seen[id], recover: true })), ...starterRemoval],
+    put: fromFile,
+    recovery: { id: newId(), takenAt: now.toISOString(), describe: (replaced) => `Before restoring a backup over ${quoted(replaced)}` },
+  });
   return {
-    added: backup.workspaces.filter((bundle) => !existingIds.has(bundle.workspace.id)).map((bundle) => bundle.workspace.name),
-    replaced: replacedBundles.map((bundle) => bundle.workspace.name),
-    recoveryPointId: point?.id ?? null,
+    added: fromFile.filter((bundle) => !replaceIds.has(bundle.workspace.id)).map((bundle) => bundle.workspace.name),
+    replaced: (result.recoveryPoint?.bundles ?? []).map((bundle) => bundle.workspace.name),
+    recoveryPointId: result.recoveryPoint?.id ?? null,
   };
 }
 
-/** Delete one class. A recovery point is stored first. */
-export async function deleteWorkspace(store: WorkspaceStore, id: string, now: Date = new Date()): Promise<RecoveryPoint | null> {
-  const bundles = await bundlesFor(store, [id]);
-  const point = await saveRecoveryPoint(store, `Before deleting "${bundles[0]?.workspace.name ?? 'a class'}"`, bundles, now);
-  await store.deleteWorkspace(id);
-  return point;
+/**
+ * Delete one class. The recovery copy is taken in the same step as the
+ * deletion, from the class as it is at that instant.
+ *
+ * `expected` is `stampOf` the class as the teacher last saw it. If the class
+ * has changed since, nothing is deleted and a StoreConflictError is thrown.
+ */
+export async function deleteWorkspace(store: WorkspaceStore, id: string, expected: string, now: Date = new Date()): Promise<RecoveryPoint | null> {
+  const result = await store.replaceClasses({
+    remove: [{ id, expected, recover: true }],
+    put: [],
+    recovery: { id: newId(), takenAt: now.toISOString(), describe: (deleted) => `Before deleting ${quoted(deleted)}` },
+  });
+  return result.recoveryPoint;
 }
 
 /**
  * Put the classes of a recovery point back. A class that still exists under
- * the same id is itself saved to a new recovery point first, so undoing is
- * also undoable.
+ * the same id goes into a new recovery point in the same step, so undoing is
+ * also undoable. Refused, with nothing changed, if any class involved is no
+ * longer what the teacher was shown or the recovery point has already been used.
  */
-export async function applyRecoveryPoint(store: WorkspaceStore, point: RecoveryPoint, now: Date = new Date()): Promise<void> {
-  const existingIds = new Set((await store.listWorkspaces()).map((workspace) => workspace.id));
-  const replaceIds = point.bundles.map((bundle) => bundle.workspace.id).filter((id) => existingIds.has(id));
-  const current = await bundlesFor(store, replaceIds);
-  await saveRecoveryPoint(store, `Before undoing: ${point.reason.replace(/^Before /, '')}`, current, now);
-  await store.putBundles(point.bundles, { replace: replaceIds });
-  await store.deleteRecoveryPoint(point.id);
+export async function applyRecoveryPoint(store: WorkspaceStore, point: RecoveryPoint, seen: SeenClasses, now: Date = new Date()): Promise<void> {
+  const replaceIds = point.bundles.map((bundle) => bundle.workspace.id).filter((id) => id in seen);
+  await store.replaceClasses({
+    remove: replaceIds.map((id) => ({ id, expected: seen[id], recover: true })),
+    put: point.bundles,
+    recovery: { id: newId(), takenAt: now.toISOString(), describe: () => `Before undoing: ${point.reason.replace(/^Before /, '')}` },
+    consumeRecoveryPointId: point.id,
+  });
 }
 
-/** The explicit "delete everything in this browser" action. Not undoable. */
-export function clearAllData(store: WorkspaceStore): Promise<void> {
-  return store.clearAll();
+/**
+ * The explicit "delete everything in this browser" action. Not undoable, so it
+ * is refused if the classes are not exactly those the teacher was shown.
+ */
+export function clearAllData(store: WorkspaceStore, seen: SeenClasses): Promise<void> {
+  return store.clearAll(seen);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +313,7 @@ export function clearAllData(store: WorkspaceStore): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export interface BackupStatus {
-  /** never: no backup exists. current: nothing changed since. stale: there are changes not in any backup. */
+  /** never: no confirmed backup. current: nothing changed since the last confirmed one. stale: there are changes not in any confirmed backup. */
   state: 'never' | 'current' | 'stale';
   lastBackupAt: string | null;
   /** Spins logged after the last backup. */
@@ -277,13 +342,17 @@ const daysAgo = (iso: string): string => {
   return days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
 };
 
-/** One-line, plain-language backup status for a class. */
+/**
+ * One-line, plain-language backup status for a class.
+ * "Confirmed" means the teacher said they have the file, or the class was
+ * restored from one. RingWheel cannot see the downloads folder.
+ */
 export function describeBackup(status: BackupStatus): string {
-  if (status.state === 'never') return 'Never backed up';
-  if (status.state === 'current') return `Backed up ${daysAgo(status.lastBackupAt as string)}`;
+  if (status.state === 'never') return 'No confirmed backup';
+  if (status.state === 'current') return `Last confirmed backup: ${daysAgo(status.lastBackupAt as string)}`;
   const parts = [
     status.spinsSince > 0 ? `${status.spinsSince} spin${status.spinsSince === 1 ? '' : 's'}` : '',
     status.rosterChangedSince ? 'roster or settings changes' : '',
   ].filter(Boolean);
-  return `Not in a backup yet: ${parts.join(' and ')}`;
+  return `Not in a confirmed backup: ${parts.join(' and ')}`;
 }

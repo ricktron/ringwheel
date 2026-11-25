@@ -736,6 +736,11 @@ local.on('request', (req) => localRequests.push(req.url()));
 const lp = await local.newPage();
 const localErrors = [];
 lp.on('pageerror', (err) => localErrors.push(err.message));
+/** A second tab in the same browser profile: same origin, same real IndexedDB database. */
+const lp2 = await local.newPage();
+lp2.on('pageerror', (err) => localErrors.push(err.message));
+await lp.bringToFront();
+let realIdbScenarios = 0;
 
 const foreignRequests = () => localRequests.filter((url) => !url.startsWith(app.url) && !/^(data|blob):/.test(url));
 const classList = () => lp.getByTestId('class-list').locator('li');
@@ -773,7 +778,7 @@ await step('Local Mode works on first visit with nothing configured', async () =
   await lp.locator('[data-testid="api-status"][data-status="ok"][data-mode="local"]').waitFor();
   assert.match(await text(lp, 'api-status'), /Browser storage: working/);
   assert.match(await text(lp, 'storage-badge'), /Local Mode\. Class "My class" is stored in this browser only\./);
-  assert.match(await text(lp, 'backup-status'), /Never backed up/);
+  assert.match(await text(lp, 'backup-status'), /No confirmed backup/);
   assert.equal(await lp.getByTestId('api-not-configured').count(), 0);
   assert.equal(await lp.getByTestId('api-note').count(), 0);
   await lp.getByTestId('ring-wheel').waitFor();
@@ -799,7 +804,7 @@ await step('a spin with no roster is saved in this browser and says so', async (
   assert.match(panel, /Saved in this browser/);
   assert.doesNotMatch(panel, /Saved to the log/);
   await assertWheelPointsAt(lp, { region: result.region, taxon: result.taxon, iucn: result.iucn });
-  assert.match(await text(lp, 'backup-status'), /Never backed up/);
+  assert.match(await text(lp, 'backup-status'), /No confirmed backup/);
 });
 
 await step('a class can be renamed and students added by hand, with a warning before adding a duplicate', async () => {
@@ -916,7 +921,7 @@ await step('everything is still there after the page is reloaded', async () => {
   await lp.getByTestId('roster-table').waitFor();
   assert.deepEqual(await rosterNames(), ['Ada Sample', 'Ben Placeholder', 'Cy Demo', 'Eli Testcase']);
   assert.equal(await lp.getByLabel('Eli Testcase is in the spin queue').isChecked(), false);
-  await classList().first().getByText(/4 students, 4 spins\. Never backed up\./).waitFor();
+  await classList().first().getByText(/4 students, 4 spins\. No confirmed backup\./).waitFor();
 });
 
 await step('class settings are saved in this browser and survive a reload', async () => {
@@ -972,7 +977,7 @@ await step('a second class is completely separate: its own roster, history and s
 
 let backupText;
 let backup;
-await step('a full backup downloads as a file and the page then shows the classes as backed up', async () => {
+await step('a full backup downloads as a file, and is only recorded as a backup once the teacher confirms they have it', async () => {
   await lp.goto(`${app.url}/classes`);
   await lp.getByTestId('class-list').waitFor();
   const file = await downloadFrom(lp, () => lp.getByRole('button', { name: 'Back up all classes' }).click());
@@ -997,9 +1002,73 @@ await step('a full backup downloads as a file and the page then shows the classe
   const replay = engineSpin({ seed: adaSpin.seed });
   assert.deepEqual([replay.region, replay.taxon, replay.iucn], [adaSpin.result_A, adaSpin.result_B, adaSpin.result_C]);
 
-  await waitNotice(/Backup downloaded \(2 classes\)/);
-  await lp.getByTestId('class-list').getByText(/Backed up today/).first().waitFor();
-  assert.match(await text(lp, 'backup-status'), /Backed up today/);
+  // The browser was handed the file. The page cannot know more than that, and must not claim more.
+  const confirm = lp.getByTestId('backup-confirm');
+  await confirm.waitFor();
+  assert.match(await confirm.innerText(), /cannot see whether the browser actually saved it/);
+  assert.match(await confirm.innerText(), /Until you do, no backup is recorded/);
+  const unconfirmed = async (why) => {
+    assert.equal(await lp.getByTestId('class-list').getByText(/Last confirmed backup/).count(), 0, `${why}: a class is shown as backed up`);
+    assert.equal(await lp.getByTestId('class-list').getByText(/No confirmed backup/).count(), 2, `${why}: both classes should still say no confirmed backup`);
+    assert.match(await text(lp, 'backup-status'), /No confirmed backup/, why);
+  };
+  await unconfirmed('right after the download started');
+
+  // The teacher says the file did not save (blocked, cancelled, disk full): nothing is recorded.
+  await lp.getByTestId('backup-confirm-no').click();
+  await waitNotice(/No backup was recorded\. Your classes are unchanged\./);
+  assert.equal(await confirm.count(), 0);
+  await unconfirmed('after answering that the file did not save');
+
+  // A download the browser refuses outright is reported as a failure and records nothing.
+  await lp.evaluate(() => {
+    window.__realCreateObjectURL = URL.createObjectURL;
+    URL.createObjectURL = () => {
+      throw new Error('downloads are blocked in this test');
+    };
+  });
+  await lp.getByRole('button', { name: 'Back up all classes' }).click();
+  await waitNotice(/The browser did not accept the download, so no backup was recorded \(downloads are blocked in this test\)/);
+  assert.equal(await confirm.count(), 0, 'a failed download still asked for confirmation');
+  await unconfirmed('after a download the browser refused');
+  await lp.evaluate(() => {
+    URL.createObjectURL = window.__realCreateObjectURL;
+  });
+
+  // A download that started but was never confirmed is still not a backup after a reload.
+  await downloadFrom(lp, () => lp.getByRole('button', { name: 'Back up all classes' }).click());
+  await confirm.waitFor();
+  await lp.reload();
+  await lp.getByTestId('class-list').getByText(/No confirmed backup/).first().waitFor();
+  assert.equal(await confirm.count(), 0);
+  await unconfirmed('after reloading with an unanswered download');
+
+  // Only the teacher's own confirmation records it.
+  const kept = await downloadFrom(lp, () => lp.getByRole('button', { name: 'Back up all classes' }).click());
+  await confirm.waitFor();
+  await lp.getByTestId('backup-confirm-yes').click();
+  await waitNotice(/Backup recorded \(2 classes\)\. Keep the file somewhere safe/);
+  await lp.getByTestId('class-list').getByText(/Last confirmed backup: today/).first().waitFor();
+  assert.equal(await lp.getByTestId('class-list').getByText(/Last confirmed backup: today/).count(), 2);
+  assert.match(await text(lp, 'backup-status'), /Last confirmed backup: today/);
+  // The time recorded is when the file was built, not when the button was pressed.
+  const recorded = await lp.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open('ringwheel');
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const all = open.result.transaction('workspaces').objectStore('workspaces').getAll();
+          all.onsuccess = () => {
+            open.result.close();
+            resolve(all.result.map((w) => w.lastBackupAt));
+          };
+          all.onerror = () => reject(all.error);
+        };
+      })
+  );
+  const keptExportedAt = JSON.parse(kept.text).exportedAt;
+  assert.deepEqual(recorded, [keptExportedAt, keptExportedAt]);
 });
 
 await step('spin history and roster export as ordinary CSV files', async () => {
@@ -1051,7 +1120,7 @@ await step('deleting everything needs a typed confirmation, and then really empt
   await waitNotice(/All RingWheel classes, rosters, history and recovery points were deleted/);
   assert.equal(await classList().count(), 1);
   await classList().first().getByText('My class', { exact: true }).waitFor();
-  await classList().first().getByText(/0 students, 0 spins\. Never backed up\./).waitFor();
+  await classList().first().getByText(/0 students, 0 spins\. No confirmed backup\./).waitFor();
   assert.equal(await lp.getByTestId('roster-table').count(), 0);
   await lp.reload();
   await lp.getByTestId('class-list').waitFor();
@@ -1071,6 +1140,9 @@ await step('restoring the backup brings back identical data: a full round trip',
   await lp.getByTestId('restore-add').click();
   await waitNotice(/Restore finished\. Added: Period 3 Ecology, Period 5 Ecology\./);
   assert.deepEqual(await classList().locator('label .font-bold').allInnerTexts(), ['Period 3 Ecology', 'Period 5 Ecology']);
+  // The classes came out of a file the teacher is holding, so they count as backed up as of that file.
+  await lp.getByTestId('class-list').getByText(/Last confirmed backup: today/).first().waitFor();
+  assert.equal(await lp.getByTestId('class-list').getByText(/Last confirmed backup: today/).count(), 2);
 
   // Every class, student, spin, timestamp, seed and setting is back exactly as it was backed up.
   const again = JSON.parse((await downloadFrom(lp, () => lp.getByRole('button', { name: 'Back up all classes' }).click())).text);
@@ -1117,6 +1189,148 @@ await step('deleting a class asks first, keeps a recovery copy, and can be undon
   await classList().filter({ hasText: 'Period 5 Ecology' }).getByText(/1 student, 1 spin\./).waitFor();
 });
 
+await step('two tabs: a spin logged in another tab makes this tab refuse a stale Delete, and nothing is lost', async () => {
+  const p3 = () => classList().filter({ hasText: 'Period 3 Ecology' });
+  await p3().getByText(/3 students, 4 spins\./).waitFor();
+  const recoveryBefore = await lp.getByTestId('recovery-list').locator('li').allInnerTexts();
+
+  // Tab 2: the same browser, the same real IndexedDB. A spin is logged in Period 3.
+  await lp2.goto(`${app.url}/spin`);
+  await lp2.getByTestId('class-select').waitFor();
+  assert.equal(await lp2.getByTestId('class-select').locator('option:checked').innerText(), 'Period 3 Ecology');
+  await spinOnce(lp2);
+  await waitForLogStatus(lp2, 'logged');
+
+  // Tab 1 has not been touched and still shows 4 spins. Its Delete must not go through.
+  assert.match(await p3().innerText(), /3 students, 4 spins\./);
+  await p3().getByRole('button', { name: 'Delete' }).click();
+  await p3().getByRole('button', { name: 'Yes, delete "Period 3 Ecology"' }).click();
+  await waitNotice(/"Period 3 Ecology" changed in another tab or window after this page last showed it\. Nothing was deleted or replaced\./);
+  assert.equal(await classList().count(), 2, 'the class was deleted although it had changed in another tab');
+  // The page now shows the current version, including the spin from the other tab.
+  await p3().getByText(/3 students, 5 spins\./).waitFor();
+  assert.deepEqual(await lp.getByTestId('recovery-list').locator('li').allInnerTexts(), recoveryBefore, 'a refused delete left a recovery copy');
+});
+
+await step('two tabs: a roster edit in another tab makes this tab refuse a stale Replace; the retry keeps the edit in the recovery copy', async () => {
+  const p3 = () => classList().filter({ hasText: 'Period 3 Ecology' });
+  await lp.getByTestId('restore-file').setInputFiles(asFile('my-backup.json', backupText));
+  await lp.getByTestId('restore-preview').getByText('Period 3 Ecology: 4 students, 4 spins (this class already exists in this browser)').waitFor();
+
+  // Tab 2 adds a student while tab 1 is looking at the restore preview.
+  await lp2.goto(`${app.url}/classes`);
+  await lp2.getByTestId('class-list').waitFor();
+  await lp2.getByLabel('Student name').fill('Gus Madeup');
+  await lp2.getByRole('button', { name: 'Add student' }).click();
+  await lp2.getByTestId('roster-table').getByLabel('Name of Gus Madeup').waitFor();
+
+  const recoveryCount = await lp.getByTestId('recovery-list').locator('li').count();
+  await lp.getByTestId('restore-replace').click();
+  await waitNotice(/"Period 3 Ecology" changed in another tab or window after this page last showed it\. Nothing was deleted or replaced\./);
+  await p3().getByText(/4 students, 5 spins\./).waitFor();
+  assert.deepEqual(await rosterNames(), ['Ada Sample', 'Ben Placeholder', 'Eli Testcase', 'Gus Madeup']);
+  assert.equal(await lp.getByTestId('recovery-list').locator('li').count(), recoveryCount, 'a refused restore left a recovery copy');
+
+  // Having seen the current version, the teacher goes ahead. The replaced class, new student and new spin included, is kept.
+  await lp.getByTestId('restore-replace').click();
+  await waitNotice(/Replaced: Period 3 Ecology, Period 5 Ecology\. The previous version is under Recovery below\./);
+  assert.deepEqual(await rosterNames(), ['Ada Sample', 'Ben Placeholder', 'Cy Demo', 'Eli Testcase']);
+  const point = lp.getByTestId('recovery-list').locator('li').filter({ hasText: 'Before restoring a backup over' }).first();
+  assert.match(await point.innerText(), /Period 3 Ecology \(4 students, 5 spins\)/);
+
+  // Tab 2 still shows the class as it was before the restore. It cannot edit over the restored version.
+  await lp2.getByRole('button', { name: 'Remove Gus Madeup' }).click();
+  await lp2.getByTestId('classes-notice').getByText(/This class was changed in another tab or window/).waitFor({ timeout: 10000 });
+  assert.deepEqual(await rosterNames(), ['Ada Sample', 'Ben Placeholder', 'Cy Demo', 'Eli Testcase']);
+});
+
+await step('two tabs: a spin logged in another tab makes this tab refuse a stale "Put it back"; the retry keeps that spin', async () => {
+  const p3 = () => classList().filter({ hasText: 'Period 3 Ecology' });
+  await p3().getByText(/4 students, 4 spins\./).waitFor();
+
+  await lp2.goto(`${app.url}/spin`);
+  await lp2.getByTestId('class-select').waitFor();
+  await spinOnce(lp2);
+  await waitForLogStatus(lp2, 'logged');
+
+  const points = lp.getByTestId('recovery-list').locator('li');
+  const before = await points.allInnerTexts();
+  await points.filter({ hasText: 'Before restoring a backup over' }).first().getByRole('button', { name: 'Put it back' }).click();
+  await waitNotice(/"Period 3 Ecology" changed in another tab or window after this page last showed it\. Nothing was deleted or replaced\./);
+  // The class still holds the spin from the other tab, and the recovery copy was not used up.
+  await p3().getByText(/4 students, 5 spins\./).waitFor();
+  assert.deepEqual(await points.allInnerTexts(), before);
+
+  await points.filter({ hasText: 'Before restoring a backup over' }).first().getByRole('button', { name: 'Put it back' }).click();
+  await waitNotice(/Restored: Period 3 Ecology, Period 5 Ecology\./);
+  assert.deepEqual(await rosterNames(), ['Ada Sample', 'Ben Placeholder', 'Eli Testcase', 'Gus Madeup']);
+  await p3().getByText(/4 students, 5 spins\./).waitFor();
+  // The version that was just replaced, with the other tab's spin in it, is itself recoverable.
+  const undoPoint = points.filter({ hasText: 'Before undoing: restoring a backup over' }).first();
+  assert.match(await undoPoint.innerText(), /Period 3 Ecology \(4 students, 5 spins\)/);
+});
+
+await step('two tabs: "delete everything" is refused when another tab logged a spin after this tab showed the list', async () => {
+  await lp2.goto(`${app.url}/spin`);
+  await lp2.getByTestId('class-select').waitFor();
+  await spinOnce(lp2);
+  await waitForLogStatus(lp2, 'logged');
+
+  await lp.getByTestId('clear-confirm').fill('DELETE');
+  await lp.getByTestId('clear-all').click();
+  await waitNotice(/Your classes changed in another tab or window after this page last showed them\. Nothing was deleted\./);
+  assert.equal(await classList().count(), 2);
+  await classList().filter({ hasText: 'Period 3 Ecology' }).getByText(/4 students, 6 spins\./).waitFor();
+  await lp.getByTestId('clear-confirm').fill('');
+  await lp2.close();
+});
+
+await step('the concurrency regressions hold against the real browser IndexedDB, not only the test double', async () => {
+  const outcome = await lp.evaluate(async () => {
+    const { scenarios } = await import('/tests/local/concurrency-scenarios.ts');
+    const { IndexedDbStore } = await import('/src/data/local/idb-store.ts');
+    const opened = [];
+    const names = [];
+    let n = 0;
+    // Two separate connections to one real database, as two tabs have.
+    const open = async () => {
+      const name = `ringwheel-concurrency-check-${Date.now()}-${n++}`;
+      names.push(name);
+      const a = await IndexedDbStore.open(indexedDB, name);
+      const b = await IndexedDbStore.open(indexedDB, name);
+      opened.push(a, b);
+      return { a, b };
+    };
+    const results = [];
+    for (const scenario of scenarios) {
+      try {
+        await scenario.run(open);
+        results.push({ name: scenario.name, ok: true });
+      } catch (err) {
+        results.push({ name: scenario.name, ok: false, error: String(err && err.message ? err.message : err) });
+      }
+    }
+    // Leave nothing behind in the browser.
+    for (const store of opened) store.close();
+    for (const name of names) {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(name);
+        req.onsuccess = resolve;
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error(`could not remove ${name}`));
+      });
+    }
+    const left = (await indexedDB.databases()).map((db) => db.name);
+    return { results, databases: names.length, left, native: /\[native code\]/.test(Function.prototype.toString.call(indexedDB.open)) };
+  });
+  assert.ok(outcome.native, 'this did not run against the browser\'s own IndexedDB');
+  assert.ok(outcome.results.length >= 14, `only ${outcome.results.length} scenarios ran`);
+  assert.deepEqual(outcome.results.filter((result) => !result.ok), []);
+  assert.ok(outcome.databases >= outcome.results.length);
+  assert.deepEqual(outcome.left, ['ringwheel'], 'the check left a database behind or touched the app\'s own');
+  realIdbScenarios = outcome.results.length;
+});
+
 await step('Local Mode keeps working with the network switched off', async () => {
   await classList().filter({ hasText: 'Period 3 Ecology' }).getByRole('radio').check();
   await lp.getByRole('link', { name: 'Back to spinner' }).click();
@@ -1134,7 +1348,7 @@ await step('Local Mode keeps working with the network switched off', async () =>
     await lp.getByLabel('Student name').fill('Fay Mock');
     await lp.getByRole('button', { name: 'Add student' }).click();
     await lp.getByTestId('roster-table').getByLabel('Name of Fay Mock').waitFor();
-    await classList().filter({ hasText: 'Period 3 Ecology' }).getByText(/4 students, 5 spins\./).waitFor();
+    await classList().filter({ hasText: 'Period 3 Ecology' }).getByText(/5 students, 7 spins\./).waitFor();
   } finally {
     await local.setOffline(false);
   }
@@ -1350,5 +1564,6 @@ await browser.close();
 await mock.close();
 
 console.log(results.join('\n'));
+if (realIdbScenarios) console.log(`\n${realIdbScenarios} concurrency scenarios ran against the real browser IndexedDB`);
 console.log(`\n${results.length - failures - skipped} passed, ${failures} failed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(failures === 0 ? 0 : 1);

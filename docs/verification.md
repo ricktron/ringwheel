@@ -21,8 +21,9 @@ Both must finish with no failures.
 - [ ] The class named in the Local Mode line is the one you mean to use.
 - [ ] Load Roster lists the students you expect.
 - [ ] Next Spinner, then SPIN. The result panel says "Saved in this browser".
-- [ ] If the Local Mode line says "Never backed up" or "Not in a backup yet", download a backup
-      from Classes when class is over.
+- [ ] If the Local Mode line says "No confirmed backup" or "Not in a confirmed backup", download
+      a backup from Classes when class is over, check the file is in your downloads folder, and
+      answer "Yes, I have the file". The backup is only recorded once you answer.
 
 ## Before class, Connected Mode (about two minutes)
 
