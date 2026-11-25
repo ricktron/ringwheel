@@ -741,6 +741,7 @@ const lp2 = await local.newPage();
 lp2.on('pageerror', (err) => localErrors.push(err.message));
 await lp.bringToFront();
 let realIdbScenarios = 0;
+let realIdbPresentation = 0;
 
 const foreignRequests = () => localRequests.filter((url) => !url.startsWith(app.url) && !/^(data|blob):/.test(url));
 const classList = () => lp.getByTestId('class-list').locator('li');
@@ -1339,6 +1340,77 @@ await step('the concurrency regressions hold against the real browser IndexedDB,
   realIdbScenarios = outcome.results.length;
 });
 
+await step('presentation draws and rollback to the older build hold against the real browser IndexedDB', async () => {
+  // PR 10a has no screens. This runs the storage scenarios, and the frozen older build's own code,
+  // inside the page against the browser's real database engine.
+  const outcome = await lp.evaluate(async () => {
+    const { scenarios } = await import('/tests/presentation/scenarios.ts');
+    const { compatScenarios } = await import('/tests/compat/scenarios.ts');
+    const { indexedDbPair } = await import('/tests/compat/pair.ts');
+    const { IndexedDbStore } = await import('/src/data/local/idb-store.ts');
+    const opened = [];
+    const names = [];
+    let n = 0;
+    const fresh = () => {
+      const name = `ringwheel-presentation-check-${Date.now()}-${n++}`;
+      names.push(name);
+      return name;
+    };
+    // Two separate connections to one real database, as two tabs have.
+    const openTabs = async () => {
+      const name = fresh();
+      const a = await IndexedDbStore.open(indexedDB, name);
+      const b = await IndexedDbStore.open(indexedDB, name);
+      opened.push(a, b);
+      return { a, b };
+    };
+    // The current build and the older build on one real database.
+    const openPair = async () => {
+      const pair = await indexedDbPair(indexedDB, fresh());
+      opened.push(pair);
+      return pair;
+    };
+    const run = async (list, open, skip) => {
+      const results = [];
+      for (const scenario of list) {
+        if (skip(scenario)) continue;
+        try {
+          await scenario.run(open);
+          results.push({ id: scenario.id, ok: true });
+        } catch (err) {
+          results.push({ id: scenario.id, ok: false, error: String(err && err.message ? err.message : err) });
+        }
+      }
+      return results;
+    };
+    const storage = await run(scenarios, openTabs, (scenario) => scenario.heavy || scenario.memoryOnly);
+    const rollback = await run(compatScenarios, openPair, () => false);
+    // Leave nothing behind in the browser.
+    for (const store of opened) store.close();
+    for (const name of names) {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(name);
+        req.onsuccess = resolve;
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error(`could not remove ${name}`));
+      });
+    }
+    const left = (await indexedDB.databases()).map((db) => db.name);
+    return { storage, rollback, left, native: /\[native code\]/.test(Function.prototype.toString.call(indexedDB.open)) };
+  });
+  assert.ok(outcome.native, 'this did not run against the browser\'s own IndexedDB');
+  assert.deepEqual([...outcome.storage, ...outcome.rollback].filter((result) => !result.ok), []);
+  // The rows the plan marks for a real browser, and the rest of the rollback rows.
+  const ran = new Set([...outcome.storage, ...outcome.rollback].map((result) => result.id));
+  for (const id of ['C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'K1', 'K2', 'K6', 'K7', 'K10', 'K11', 'K13', 'K14', 'S2', 'S9', 'S10', 'S12']) {
+    assert.ok(ran.has(id), `${id} did not run in the browser`);
+  }
+  assert.ok(outcome.storage.length >= 35, `only ${outcome.storage.length} storage scenarios ran`);
+  assert.equal(outcome.rollback.length, 12);
+  assert.deepEqual(outcome.left, ['ringwheel'], 'the check left a database behind or touched the app\'s own');
+  realIdbPresentation = outcome.storage.length + outcome.rollback.length;
+});
+
 await step('Local Mode keeps working with the network switched off', async () => {
   await classList().filter({ hasText: 'Period 3 Ecology' }).getByRole('radio').check();
   await lp.getByRole('link', { name: 'Back to spinner' }).click();
@@ -1573,5 +1645,6 @@ await mock.close();
 
 console.log(results.join('\n'));
 if (realIdbScenarios) console.log(`\n${realIdbScenarios} concurrency scenarios ran against the real browser IndexedDB`);
+if (realIdbPresentation) console.log(`${realIdbPresentation} presentation and rollback scenarios ran against the real browser IndexedDB`);
 console.log(`\n${results.length - failures - skipped} passed, ${failures} failed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(failures === 0 ? 0 : 1);

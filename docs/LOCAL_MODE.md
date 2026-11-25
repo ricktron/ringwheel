@@ -145,10 +145,21 @@ store and the IndexedDB code in `npm test`, and against Chromium's real IndexedD
 
 ### Changing the schema later
 
-1. Bump `WORKSPACE_SCHEMA_VERSION` and add a step to `migrateWorkspace`.
-2. If a store or index is added, bump `DB_VERSION` in `idb-store.ts` and extend `upgrade`.
-3. If the backup file gains fields, bump `BACKUP_FORMAT_VERSION`. Older files must still import.
-4. A file or class saved by a newer version is refused with a clear message, never half-read.
+Version numbers describe what a record holds, not which build wrote it. A class with no
+presentation data is schema 1 and a backup with no presentation data is format 1, whichever
+build wrote them, so they stay readable by the site as it was before Presentation Draw. See
+"Presentation Draw storage" below before changing any of this.
+
+1. Prefer an optional field on the class record over a new object store. Every store write
+   spreads the record it read inside its own transaction, so a field a build does not know
+   about survives that build's edits. A new object store would need a `DB_VERSION` bump, and an
+   older site cannot open a database with a higher version at all.
+2. Give the new content its own version number and stamp it only on records that hold the
+   content (`schemaVersionFor`, `formatVersionFor` in `schema.ts`).
+3. A file or class saved by a newer version is refused with a "newer version" message, never
+   half-read. So is a record that claims a version without holding what that version writes.
+4. If a store or index really must be added, bump `DB_VERSION` in `idb-store.ts`, extend
+   `upgrade`, and treat it as a one-way change that needs its own rollback plan.
 
 ## Backup, restore and export
 
@@ -223,61 +234,199 @@ Guarantees, each covered by a test:
 The spin queue is rebuilt each time the page loads in both modes. Who has already spun today
 is not remembered across a reload. That belongs to Presentation Draw (PR #10).
 
-## Interfaces reserved for later work
+## Presentation Draw storage
 
-Nothing below is implemented. It records the smallest additions the next two pieces of work
-need, so this change does not have to be reworked.
+Status: logic and storage only (PR 10a). **There is no screen, route or link for it yet**, and
+nothing a teacher can do in this build creates presentation data. The screens are PR 10b. This
+section is the contract PR 10b builds on.
 
-### PR #10: Presentation Draw
+Presentation Draw puts a class into a random speaking order for an assignment and tracks who
+has presented. It is separate from the Ecology wheel: it does not change the spin engine, the
+student queue or the "In queue" checkbox, and decisions D1 to D11 are untouched.
 
-Already in place and relied on: stable student ids, the per-student `active` flag, the seeded
-shuffle in the spin engine, revision-checked edits, recovery points, and the schema migration
-hook.
+### Where the code is
 
-Additions (workspace schema version 2, database version 2, backup format version 2):
+| Path | What it is |
+| --- | --- |
+| `src/presentation/` | Pure logic: draw, eligibility, actions, replay, schedule, capacity, validation. No network, storage, clock or randomness of its own (enforced by `tests/repo/presentation-hygiene.test.ts`). |
+| `src/data/local/presentations.ts` | The operations a screen will call. Each is one stale-safe write. |
+| `src/data/local/store.ts`, `idb-store.ts` | `updatePresentation`, the only way presentation data is changed. |
+| `tests/compat/baseline-a785855/` | Frozen copy of the storage code as it shipped before this feature. Test-only. Never edit, never import from `src/`. |
+
+### Storage shape
+
+One optional field on the class record, `presentation`. No new object store, no new index,
+`DB_VERSION` stays 1.
 
 ```ts
-/** Why a student is left out of a draw. Separate from `active`, which is a roster-level switch. */
-interface DrawExclusion {
-  studentId: string;
-  reason: 'absent' | 'already_presented' | 'teacher_choice';
-  until: string | null;          // ISO date; null means until removed
-}
-
-interface PresentationSession {
-  id: string;
-  workspaceId: string;
-  title: string;
-  createdAt: string;
+interface PresentationData {
+  epoch: string;      // lineage id: new whenever the class is restored, replaced or put back
+  rev: number;        // rises by one on every presentation write
   updatedAt: string;
-  status: 'draft' | 'active' | 'finished';
-  seed: string;                  // the order is the engine's shuffle of eligible ids under this seed
-  exclusions: DrawExclusion[];
-  schedule: {
-    startDate: string;           // ISO date
-    meetingWeekdays: number[];   // 0 = Sunday
-    slotsPerMeeting: number;
-    skipDates: string[];
-  };
-  entries: PresentationEntry[];
-}
-
-interface PresentationEntry {
-  studentId: string;
-  position: number;              // fixed once drawn
-  state: 'pending' | 'completed' | 'skipped' | 'absent';
-  estimatedDate: string | null;  // derived from the schedule; stored so it can be shown offline
-  completedAt: string | null;
+  classLog: ClassLogEntry[];          // class-level eligibility changes and the "continued" marker
+  inactive: InactiveStudent[];        // students not presenting in this class (derived from classLog)
+  movedTo: { classId; at; on } | null;        // set when the work continued in another class
+  continuedFrom: { classId; marker } | null;  // set on a class that continues another
+  draws: PresentationDraw[];
 }
 ```
 
-- Storage: a new `sessions` object store keyed by `id` with an index on `workspaceId`, plus
-  `listSessions`, `putSession(expectedUpdatedAt)` and `deleteSession` on `WorkspaceStore`.
-- Backup: each class bundle gains `sessions: PresentationSession[]`. A version 1 file imports
-  with an empty list.
-- Resumption: a session is the saved state. Reopening the page loads the `active` session.
-- Connected Mode would need new Sheet tabs. That is a separate decision; the provider interface
-  should grow session calls on the local provider only until it is made.
+A draw holds its order (seed, input ids, drawn positions), a starting snapshot (`base`), an
+append-only event log, and the current state. Types are in `src/presentation/types.ts`.
+
+### Version rules
+
+| Record | Version |
+| --- | --- |
+| Class with no `presentation` field | `schemaVersion` 1, exactly the ten original fields, byte-identical to the older build's record |
+| Class with a `presentation` field | `schemaVersion` 2, and `rev` at least 2 |
+| Backup with no presentation data in any class | `formatVersion` 1, byte-identical to the older build's file |
+| Backup where any class holds presentation data | `formatVersion` 2. Classes inside it without presentation data are still schema 1. |
+
+Both directions are enforced on restore: schema 2 without presentation data, format 2 without
+any presentation class, and presentation data on a revision-1 class are each refused. Schema 3
+or format 3 is refused as "newer version". Nothing is written when a file is refused.
+
+**The first-write rule.** The write that creates a class's presentation data also raises the
+class `rev` by one (later presentation writes do not). The older build decides whether the
+automatic starter class is disposable partly by `rev === 1`; this rule means it can never see
+a class that holds presentation data as disposable.
+
+### Rollback: what the older site does with this data
+
+Verified by running the older build's own code (the frozen baseline) against data written by
+this one, on the in-memory store, on the IndexedDB code, and on Chromium's real IndexedDB.
+Scenario ids refer to `tests/compat/scenarios.ts` and `tests/presentation/scenarios.ts`.
+
+| Older build does | Result | Verified by |
+| --- | --- | --- |
+| Opens the database, lists and reads classes | Works. Presentation data is carried, unseen. | C8 |
+| Rename, add, edit or remove a student, untick "In queue", save settings, log a spin, confirm a backup | Presentation data unchanged, token unchanged | C9 |
+| Delete a class, then "Put it back" | Presentation data returns intact | C10 |
+| Replace a class from an older file | Draws move to the recovery copy. "Put it back" (either build) restores them. | C11 |
+| Back up a class that holds presentation data | Writes a file labelled format 1 with a schema 2 class. The older build refuses to reopen it ("newer version"); this build accepts it. | C12 |
+| Restore a format 2 file | Refused as "newer version". Nothing written. | C13 |
+| Restore over a starter class that holds only a draft | Never dropped: the draft stays in the class or in the recovery copy | S12 |
+| Edits from a tab still running the older code while a draw is in use | Both kept. After a replace, the presentation tab is refused. | K14 |
+
+What the older build cannot do: show, edit or back up presentation data in a form it can
+restore itself. A teacher on a rolled-back site should make backups only after rolling
+forward again, or keep the format 1 labelled file for this build to read.
+
+### The starter class
+
+`isUntouchedStarter` (the test that lets a restore replace the automatic first class without
+asking) is true only for a class that has exactly the ten original fields, is schema 1, and is
+otherwise empty. A starter class holding a draft, an empty presentation record, or any field
+this build does not recognize is never dropped. If the draft appears in another tab after the
+restore has read the class, the restore is refused and changes nothing (S1 to S14).
+
+### Stale-safe writes
+
+A tab presents a token, `{ epoch, rev }`, read from the class it is showing.
+`updatePresentation(classId, token, change)` applies `change` only if the stored token is
+still equal, inside one transaction (or one uninterrupted step in memory). Otherwise it throws
+`StoreConflictError` and nothing changes.
+
+- `rev` alone is not enough: restoring an older backup and acting again can reach the same
+  number with different content. `epoch` is replaced on every restore, replace and put-back.
+- Each action also states what it expects (`{ type: 'done', entry }` names the presenter) and
+  is refused if that is not the current state, even when the token matches.
+- Roster edits and presentation actions do not block each other.
+- The class fingerprint used by delete, replace, "Put it back" and "delete everything"
+  (`stampOf`) includes the presentation token, so a presentation action in another tab makes a
+  stale destructive action refuse. A class with no presentation data keeps its old fingerprint.
+
+### The replay contract
+
+`replay(order, base, events)` rebuilds a draw's state from its order, its starting snapshot
+and its log. It takes nothing else: not the roster, not the clock, not the source class.
+
+- Events record outcomes (who was revealed, who was passed over and why), never inputs that
+  would have to be re-evaluated.
+- **Every write is checked.** `commitPresentation` (the single gate inside
+  `updatePresentation`) replays each drawn draw and refuses the write unless the result equals
+  the state being saved. A record whose saved state disagrees with its log cannot be stored.
+- Restore runs the same check. A file with one inconsistent draw is rejected whole.
+- History only grows. A drawn order cannot be removed or altered except by a counted redraw
+  before anyone is revealed. Undo appends an event; it does not delete one.
+
+### Capacity
+
+One budget, measured as the number of bytes a class's presentation data adds to a backup file
+exactly as the file is written (`presentationFileBytes`). The number shown, the number checked
+on every write and the number that matters for restore are the same number.
+
+| Limit | Value | Effect |
+| --- | --- | --- |
+| Budget per class | 2 MiB | A write that would pass it is refused before anything is stored |
+| Warn | 75% | Reported by `usageOf` |
+| New work | 90% | New draws, new orders and redraws refused. Work on existing draws continues. |
+| Reserve | 16 KiB | Only the "continued in another class" marker may use it |
+| Open work | half the budget | Adding draws, presenters, dates or exclusions is refused once the unfinished work could no longer be carried into a new class. Reveal, done, defer, absent, skip and undo never count against it. |
+
+Nothing is ever deleted to make room. A full class is continued in a new one:
+
+- **Continue in a new class** (`continueInNewClass`) checks first that the new class id is free
+  and that the continuation fits, then freezes the old class with one marker, then creates the
+  new class. If the last step fails, `finishMoving` completes it from any tab, any number of
+  times, and always arrives at the same class. It never overwrites a class that is not the
+  continuation. `reopenPresentations` undoes the freeze while the new class does not exist.
+- The new class carries every unfinished presenter with their exact state (on deck, revealed,
+  held until a date, absent today, skipped, exclusions, schedule) and starts its own class log
+  consistent with the copied eligibility. It does not copy the old class's marker.
+- A carried draw's snapshot holds that state itself, so it replays without the old class.
+- The two rules above guarantee a full class can always be continued: the marker always fits in
+  the reserve, and the continuation is never larger than half the budget. Property-tested
+  (`Q13`, "the largest valid classes can always be continued").
+
+### Backup size
+
+RingWheel refuses to restore a file over 25 MB. `exportBackupChecked` measures the real
+serialized file (roster, settings, spin history and presentation data) and throws
+`BackupTooLargeError` rather than hand over a file that could not be restored. For "all
+classes" it reports whether each class fits on its own, so the teacher can back them up one
+at a time. Under the limit the text is exactly what `exportBackup` plus
+`JSON.stringify(backup, null, 2)` has always produced.
+
+The Classes page still calls `exportBackup` in this build. Switching it to the checked version,
+with the wording for the refusal, is PR 10b.
+
+Known and unchanged: one class can pass 25 MB through spin history alone (roughly 45,000
+spins). That was already true before this feature. `exportBackupChecked` names the class
+instead of producing the file; splitting one class's history across files is not designed.
+
+### Display privacy
+
+`publicView(draw, roster)` is the only data a projected display may use. It contains the
+title, the current and on-deck presenters once revealed, and counts. It never contains a name
+that has not been revealed. This protects what is on the screen. It does not hide data from
+someone with access to the browser profile: the full order is in the same storage.
+
+### Acceptance cases added on owner approval (2026-11-25)
+
+These refine the blueprint's capacity and continuation cases.
+
+| Case | Requirement | Test |
+| --- | --- | --- |
+| Q5 | A continued draw keeps every unfinished presenter's state: current-day absence, on deck, revealed, holds, eligibility, exclusions, schedule | Q5, R8 |
+| Q6 | Its snapshot reproduces that state without the source class | Q5 (`drawIsConsistent`), R8 |
+| Q7 | The new class starts a valid class log matching the copied eligibility, with no "moved" entry from the source | Q5, "the new class gets its own class log" |
+| Q8 | Stable destination id; retries and two tabs arrive at one class | Q8 |
+| Q9 | A conflicting class under the destination id is never overwritten; capacity and id are checked before the source is frozen | Q9 |
+| Q10 | A class at the largest valid size can always be continued | Q3, Q13, "the largest valid classes" |
+| Q11 | Backup size is the real serialized size including roster, settings and spins | Q11, Q14 |
+| Q12 | Neither a single-class nor an all-class backup over the restore limit is produced silently | Q11 |
+
+## Interfaces reserved for later work
+
+It records the smallest additions later work needs, so this change does not have to be reworked.
+
+### PR #10: Presentation Draw
+
+No longer reserved. The logic and storage are implemented (PR 10a) and described in
+"Presentation Draw storage" below. The screens are PR 10b. The design sketched here earlier (a
+separate `sessions` store, database version 2) was replaced: it could not be rolled back.
 
 ### PR #11: Theme Engine
 

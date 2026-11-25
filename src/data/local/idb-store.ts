@@ -11,17 +11,20 @@
  * Bump DB_VERSION and extend `upgrade` when a store or index is added. Record
  * shapes are versioned separately by WORKSPACE_SCHEMA_VERSION in schema.ts.
  */
+import type { PresentationData, PresentationToken } from '../../presentation/types';
 import type { LocalSpin, Workspace, WorkspaceBundle } from './schema';
 import { migrateWorkspace } from './schema';
 import {
   MAX_RECOVERY_POINTS,
   StoreMissingError,
+  applyPresentationChange,
   applyWorkspaceChange,
   byName,
   checkClearAll,
   planClassChange,
   type ClassChange,
   type ClassChangeResult,
+  withFreshEpoch,
   type RecoveryPoint,
   type WorkspaceStore,
 } from './store';
@@ -148,6 +151,27 @@ export class IndexedDbStore implements WorkspaceStore {
     });
   }
 
+  /**
+   * One transaction on the class record. The token check, the validation and
+   * replay, the size check and the write all happen inside it, so a write from
+   * another tab is either wholly before it (and the token no longer matches)
+   * or wholly after it.
+   */
+  updatePresentation(
+    id: string,
+    expected: PresentationToken,
+    change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData
+  ) {
+    return this.transact(['workspaces'], 'readwrite', async (tx) => {
+      const store = tx.objectStore('workspaces');
+      const current = await request(store.get(id));
+      if (!current) throw new StoreMissingError();
+      const next = applyPresentationChange(asWorkspace(current), expected, change, new Date());
+      await request(store.put(next));
+      return next;
+    });
+  }
+
   markBackedUp(ids: string[], at: string) {
     return this.transact(['workspaces'], 'readwrite', async (tx) => {
       const store = tx.objectStore('workspaces');
@@ -208,7 +232,7 @@ export class IndexedDbStore implements WorkspaceStore {
         if (ids.has(workspace.id)) throw new Error('The same class appears twice.');
         ids.add(workspace.id);
       }
-      await this.addBundles(tx, bundles);
+      await this.addBundles(tx, bundles.map(withFreshEpoch));
     });
   }
 

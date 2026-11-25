@@ -10,6 +10,8 @@
  */
 import type { RosterCandidate } from './csv';
 import {
+  LIMITS,
+  WORKSPACE_SCHEMA_VERSION,
   buildBackup,
   createStudent,
   createWorkspace,
@@ -38,13 +40,25 @@ export async function ensureWorkspace(store: WorkspaceStore): Promise<Workspace[
   return store.listWorkspaces();
 }
 
+/** The fields a class record had before any later feature added to it. */
+const ORIGINAL_FIELDS: ReadonlySet<string> = new Set([
+  'id', 'schemaVersion', 'name', 'createdAt', 'updatedAt', 'rev', 'students', 'settings', 'rings', 'lastBackupAt',
+]);
+
 /**
  * True for the automatically created first class while nobody has used it:
  * no students, no spins, no settings, never renamed. Such a class holds no
  * teacher data, so a restore may take its place without asking.
+ *
+ * A class that holds anything beyond the original fields is never "untouched",
+ * however empty its roster and history are. That covers presentation data
+ * (even an empty record of it) and any field written by a newer version that
+ * this one does not recognize.
  */
 export function isUntouchedStarter(workspace: Workspace, spinCount: number): boolean {
   return (
+    Object.keys(workspace).every((key) => ORIGINAL_FIELDS.has(key)) &&
+    workspace.schemaVersion === WORKSPACE_SCHEMA_VERSION &&
     workspace.id === DEFAULT_WORKSPACE_ID &&
     workspace.rev === 1 &&
     workspace.name === DEFAULT_WORKSPACE_NAME &&
@@ -168,11 +182,83 @@ export async function confirmBackup(store: WorkspaceStore, backup: BackupFile): 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Backup size
+// ---------------------------------------------------------------------------
+
+/** The one way a backup file's text is produced. The size checks below measure exactly this. */
+export function serializeBackup(backup: BackupFile): string {
+  return JSON.stringify(backup, null, 2);
+}
+
+const utf8 = (text: string): number => new TextEncoder().encode(text).length;
+
+export interface BackupMeasure {
+  /** The size of the file in bytes, as it would be written. */
+  bytes: number;
+  /** The largest file RingWheel will restore. */
+  limit: number;
+  restorable: boolean;
+  /** Each class as a backup of its own, so the teacher can be told which fit and which do not. */
+  classes: { id: string; name: string; bytes: number; restorable: boolean }[];
+}
+
+/**
+ * Measure a backup against the restore limit, using the real file text:
+ * roster, settings, spin history, presentation data and all.
+ */
+export function measureBackup(backup: BackupFile, text: string = serializeBackup(backup)): BackupMeasure {
+  const limit = LIMITS.backupBytes;
+  const bytes = utf8(text);
+  const classes = backup.workspaces.map((bundle) => {
+    const alone = backup.workspaces.length === 1 ? bytes : utf8(serializeBackup({ ...backup, formatVersion: buildBackup([bundle]).formatVersion, workspaces: [bundle] }));
+    return { id: bundle.workspace.id, name: bundle.workspace.name, bytes: alone, restorable: alone <= limit };
+  });
+  return { bytes, limit, restorable: bytes <= limit, classes };
+}
+
+/** Thrown instead of handing over a backup file that RingWheel itself could not restore. Nothing was changed. */
+export class BackupTooLargeError extends Error {
+  readonly measure: BackupMeasure;
+  constructor(measure: BackupMeasure) {
+    const mb = (n: number) => (n / (1024 * 1024)).toFixed(1);
+    const tooBig = measure.classes.filter((c) => !c.restorable);
+    super(
+      measure.classes.length > 1 && tooBig.length === 0
+        ? `These classes together make a backup of ${mb(measure.bytes)} MB, and RingWheel can restore at most ${mb(measure.limit)} MB in one file. No file was made. Back up each class on its own instead: each one fits.`
+        : `The backup of ${tooBig.map((c) => `"${c.name}"`).join(', ')} would be ${mb(tooBig[0]?.bytes ?? measure.bytes)} MB, and RingWheel can restore at most ${mb(measure.limit)} MB in one file. No file was made, because it could not be restored.`
+    );
+    this.name = 'BackupTooLargeError';
+    this.measure = measure;
+  }
+}
+
+export interface CheckedBackup {
+  backup: BackupFile;
+  /** The exact text to hand to the browser. */
+  text: string;
+  measure: BackupMeasure;
+}
+
+/**
+ * Build a backup and its file text, and refuse (BackupTooLargeError) if the
+ * file would be larger than RingWheel can restore. A backup is never silently
+ * produced in a form that could not be brought back. Records nothing.
+ */
+export async function exportBackupChecked(store: WorkspaceStore, ids?: string[], now: Date = new Date()): Promise<CheckedBackup> {
+  const backup = await exportBackup(store, ids, now);
+  const text = serializeBackup(backup);
+  const measure = measureBackup(backup, text);
+  if (!measure.restorable) throw new BackupTooLargeError(measure);
+  return { backup, text, measure };
+}
+
 /** Give a class and all of its spins fresh ids, so it can sit beside the original. */
 function withNewIds(bundle: WorkspaceBundle, name: string): WorkspaceBundle {
   const workspaceId = newId();
   return {
-    workspace: { ...bundle.workspace, id: workspaceId, name, rev: 1 },
+    // A class that holds presentation data always has a revision above 1 (see applyPresentationChange).
+    workspace: { ...bundle.workspace, id: workspaceId, name, rev: bundle.workspace.presentation ? 2 : 1 },
     // Student ids are only unique within a class, so they are kept: history keeps pointing at the right students.
     spins: bundle.spins.map((spin) => ({ ...spin, id: newId(), workspaceId })),
   };
@@ -319,21 +405,26 @@ export interface BackupStatus {
   /** Spins logged after the last backup. */
   spinsSince: number;
   rosterChangedSince: boolean;
+  /** Present only for a class that holds presentation data: whether it changed after the last backup. */
+  presentationChangedSince?: boolean;
 }
 
 export function backupStatus(bundle: WorkspaceBundle): BackupStatus {
   const { workspace, spins } = bundle;
+  const presentation = workspace.presentation;
   if (!workspace.lastBackupAt) {
-    return { state: 'never', lastBackupAt: null, spinsSince: spins.length, rosterChangedSince: true };
+    return { state: 'never', lastBackupAt: null, spinsSince: spins.length, rosterChangedSince: true, ...(presentation ? { presentationChangedSince: true } : {}) };
   }
   const since = workspace.lastBackupAt;
   const spinsSince = spins.filter((spin) => spin.timestamp_iso > since).length;
   const rosterChangedSince = workspace.updatedAt > since;
+  const presentationChangedSince = presentation ? presentation.updatedAt > since : false;
   return {
-    state: spinsSince > 0 || rosterChangedSince ? 'stale' : 'current',
+    state: spinsSince > 0 || rosterChangedSince || presentationChangedSince ? 'stale' : 'current',
     lastBackupAt: since,
     spinsSince,
     rosterChangedSince,
+    ...(presentation ? { presentationChangedSince } : {}),
   };
 }
 
@@ -353,6 +444,7 @@ export function describeBackup(status: BackupStatus): string {
   const parts = [
     status.spinsSince > 0 ? `${status.spinsSince} spin${status.spinsSince === 1 ? '' : 's'}` : '',
     status.rosterChangedSince ? 'roster or settings changes' : '',
+    status.presentationChangedSince ? 'presentation changes' : '',
   ].filter(Boolean);
   return `Not in a confirmed backup: ${parts.join(' and ')}`;
 }

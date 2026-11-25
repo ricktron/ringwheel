@@ -11,11 +11,32 @@
  * Nothing in this file touches storage or the network. It only describes and
  * checks data.
  */
+import type { PresentationData } from '../../presentation/types';
+import { validatePresentation } from '../../presentation/validate';
 import type { RingSlice, SettingRow, SpinsLogPayload } from '../../types';
 
+/**
+ * Version numbers follow content.
+ *
+ * A class that holds no presentation data is schema 1, and a backup file with
+ * no such class is format 1. Both are written exactly as they always were.
+ * A class is schema 2, and a file format 2, only when presentation data is
+ * actually present. So nothing about an existing class or backup changes
+ * until that class uses presentations.
+ */
 export const WORKSPACE_SCHEMA_VERSION = 1;
 export const BACKUP_FORMAT = 'ringwheel-backup';
 export const BACKUP_FORMAT_VERSION = 1;
+/** The schema of a class that holds presentation data, and the format of a file that holds such a class. */
+export const PRESENTATION_SCHEMA_VERSION = 2;
+export const PRESENTATION_FORMAT_VERSION = 2;
+/** The highest versions this build can read. */
+export const SUPPORTED_SCHEMA_VERSION = 2;
+export const SUPPORTED_BACKUP_FORMAT_VERSION = 2;
+
+/** The schema number a class record is stored with: decided by what it holds. */
+export const schemaVersionFor = (workspace: { presentation?: unknown }): number =>
+  workspace.presentation === undefined ? WORKSPACE_SCHEMA_VERSION : PRESENTATION_SCHEMA_VERSION;
 
 /** Guards against a mistaken or hostile import filling the browser's storage. */
 export const LIMITS = {
@@ -61,6 +82,12 @@ export interface Workspace {
   rings: RingSlice[];
   /** When this workspace was last written to a backup file, or null if never. */
   lastBackupAt: string | null;
+  /**
+   * Presentation Draw data. Absent until the class first uses presentations;
+   * its presence is what makes the record schema 2. Older builds carry this
+   * field through every edit without looking inside it.
+   */
+  presentation?: PresentationData;
 }
 
 export interface WorkspaceBundle {
@@ -218,11 +245,26 @@ function checkBundle(value: unknown, index: number, problems: Problems): Workspa
     problems.add(`${where} is missing its class record.`);
     return null;
   }
-  if (typeof value.workspace.schemaVersion === 'number' && value.workspace.schemaVersion > WORKSPACE_SCHEMA_VERSION) {
+  if (typeof value.workspace.schemaVersion === 'number' && value.workspace.schemaVersion > SUPPORTED_SCHEMA_VERSION) {
     problems.add(`${where} was saved by a newer version of RingWheel and cannot be opened by this one.`);
     return null;
   }
   const raw = migrateWorkspace(value.workspace);
+
+  // Presentation data is checked as a whole: its shape, its orders against their seeds, and its
+  // log replayed against its saved state. The check follows the class's own content, not the
+  // file's label, because a rolled-back build writes such a class into a file labelled format 1.
+  let presentation: PresentationData | undefined;
+  if (raw.presentation !== undefined) {
+    const checked = validatePresentation(raw.presentation);
+    if (checked.ok) presentation = checked.value;
+    else for (const problem of checked.problems) problems.add(`${where}: ${problem}`);
+    if (typeof raw.rev === 'number' && raw.rev < 2) problems.add(`${where} holds presentation data but its revision says it was never changed.`);
+  } else if (raw.schemaVersion === PRESENTATION_SCHEMA_VERSION) {
+    // No build writes schema 2 without presentation data, so this file was not written by one we know.
+    problems.add(`${where} says it was saved by a newer version of RingWheel, but it does not hold what that version writes. It cannot be opened.`);
+    return null;
+  }
 
   if (!isId(raw.id)) problems.add(`${where} has no valid id.`);
   if (!isText(raw.name, LIMITS.nameLength) || raw.name.trim() === '') problems.add(`${where} has no name.`);
@@ -261,7 +303,7 @@ function checkBundle(value: unknown, index: number, problems: Problems): Workspa
 
   const workspace: Workspace = {
     id: String(raw.id),
-    schemaVersion: WORKSPACE_SCHEMA_VERSION,
+    schemaVersion: schemaVersionFor({ presentation }),
     name: String(raw.name ?? ''),
     createdAt: String(raw.createdAt ?? ''),
     updatedAt: String(raw.updatedAt ?? ''),
@@ -271,6 +313,7 @@ function checkBundle(value: unknown, index: number, problems: Problems): Workspa
     rings: checkRows(raw.rings, `${where} ring weights`, problems) as unknown as RingSlice[],
     lastBackupAt: isIsoDate(raw.lastBackupAt) ? raw.lastBackupAt : null,
   };
+  if (presentation) workspace.presentation = presentation;
   return { workspace, spins };
 }
 
@@ -289,7 +332,7 @@ export function validateBackup(data: unknown): BackupCheck {
   if (typeof data.formatVersion !== 'number' || data.formatVersion < 1) {
     return { ok: false, errors: ['The backup file does not say which version it is.'] };
   }
-  if (data.formatVersion > BACKUP_FORMAT_VERSION) {
+  if (data.formatVersion > SUPPORTED_BACKUP_FORMAT_VERSION) {
     return { ok: false, errors: ['This backup was made by a newer version of RingWheel and cannot be opened by this one.'] };
   }
   if (!isIsoDate(data.exportedAt)) problems.add('The backup file has no valid export date.');
@@ -310,12 +353,16 @@ export function validateBackup(data: unknown): BackupCheck {
     bundles.push(bundle);
   });
 
+  if (problems.list.length === 0 && data.formatVersion === PRESENTATION_FORMAT_VERSION && formatVersionFor(bundles) !== PRESENTATION_FORMAT_VERSION) {
+    // No build writes format 2 for a file with no presentation data in it.
+    problems.add('This backup says it was made by a newer version of RingWheel, but it does not hold what that version writes. It cannot be opened.');
+  }
   if (problems.list.length > 0) return { ok: false, errors: problems.list };
   return {
     ok: true,
     backup: {
       format: BACKUP_FORMAT,
-      formatVersion: BACKUP_FORMAT_VERSION,
+      formatVersion: formatVersionFor(bundles),
       exportedAt: String(data.exportedAt),
       workspaces: bundles,
     },
@@ -336,10 +383,14 @@ export function parseBackupText(text: string): BackupCheck {
   return validateBackup(data);
 }
 
+/** The format number a backup file is written with: 2 only if a class in it holds presentation data. */
+export const formatVersionFor = (bundles: WorkspaceBundle[]): number =>
+  bundles.some((bundle) => bundle.workspace.presentation !== undefined) ? PRESENTATION_FORMAT_VERSION : BACKUP_FORMAT_VERSION;
+
 export function buildBackup(bundles: WorkspaceBundle[], now: Date = new Date()): BackupFile {
   return {
     format: BACKUP_FORMAT,
-    formatVersion: BACKUP_FORMAT_VERSION,
+    formatVersion: formatVersionFor(bundles),
     exportedAt: now.toISOString(),
     workspaces: bundles,
   };
