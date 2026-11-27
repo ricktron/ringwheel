@@ -16,7 +16,9 @@
  *   the change, all in one step. There is no moment in between in which
  *   another tab's spin or roster edit could be lost.
  */
-import { LIMITS, type LocalSpin, type Workspace, type WorkspaceBundle } from './schema';
+import type { PresentationData, PresentationToken } from '../../presentation/types';
+import { commitPresentation } from '../../presentation/validate';
+import { LIMITS, PRESENTATION_SCHEMA_VERSION, newId, type LocalSpin, type Workspace, type WorkspaceBundle } from './schema';
 
 export class StoreConflictError extends Error {
   constructor(message = 'This class was changed in another tab or window. Reload to see the current version, then try again.') {
@@ -70,7 +72,23 @@ function digest(text: string): string {
  */
 export function stampOf(bundle: WorkspaceBundle): string {
   const ids = bundle.spins.map((spin) => spin.id).sort();
-  return `${bundle.workspace.rev}|${bundle.workspace.updatedAt}|${ids.length}|${digest(ids.join(','))}`;
+  const stamp = `${bundle.workspace.rev}|${bundle.workspace.updatedAt}|${ids.length}|${digest(ids.join(','))}`;
+  // Presentation actions do not move the class revision, so they are part of the fingerprint too.
+  // A class with no presentation data keeps exactly the fingerprint it always had.
+  const presentation = bundle.workspace.presentation;
+  return presentation ? `${stamp}|p:${presentation.epoch}:${presentation.rev}` : stamp;
+}
+
+/**
+ * Give presentation data a new lineage id. Done whenever a whole class is put
+ * into storage (restore, replace, "Put it back", copy), so a tab that was
+ * looking at whatever was there before can no longer act on it, even if the
+ * revision numbers happen to match.
+ */
+export function withFreshEpoch(bundle: WorkspaceBundle): WorkspaceBundle {
+  const presentation = bundle.workspace.presentation;
+  if (!presentation) return bundle;
+  return { ...bundle, workspace: { ...bundle.workspace, presentation: { ...presentation, epoch: newId() } } };
 }
 
 export interface ClassRemoval {
@@ -138,7 +156,7 @@ export function planClassChange(
   }
 
   const putting = new Set<string>();
-  const put = change.put.map((bundle) => {
+  const put = change.put.map(withFreshEpoch).map((bundle) => {
     const { id } = bundle.workspace;
     if (putting.has(id)) throw new Error('The same class appears twice.');
     putting.add(id);
@@ -193,6 +211,40 @@ export interface WorkspaceStore {
   updateWorkspace(id: string, expectedRev: number, change: (current: Workspace) => Workspace): Promise<Workspace>;
   /** Record a backup time without counting as an edit. A class's backup time never moves backwards. */
   markBackedUp(ids: string[], at: string): Promise<void>;
+  /**
+   * Change a class's presentation data, in one step, only if it is still what
+   * the caller last saw (`expected`). The result is validated and replayed,
+   * checked against what was there before, and checked for size before it is
+   * stored. If any of that fails nothing is stored. `change` must be pure and
+   * must not wait for anything.
+   */
+  updatePresentation(
+    id: string,
+    expected: PresentationToken,
+    change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData
+  ): Promise<Workspace>;
+
+  /**
+   * One step that reads a class, optionally changes its presentation data
+   * (exactly as `updatePresentation` does), and adds at most one new class
+   * built from it.
+   *
+   * `build` is given the class exactly as this step leaves it, and a view of
+   * the other classes as they are in the same step. Whatever it returns is
+   * stored together with the change, or nothing is: a stale token, an invalid
+   * result, an id that is already in use, an error thrown by `build`, or a
+   * failed write leaves storage exactly as it was. `build` returns null to
+   * add nothing. It must be pure and must not wait for anything.
+   *
+   * This is how "continue in a new class" stays coherent: the new class's
+   * roster, settings, ring weights and presentation state are all read in the
+   * step that freezes the old class.
+   */
+  continuePresentation(
+    id: string,
+    change: PresentationChange | null,
+    build: (source: Workspace, others: OtherClasses) => Workspace | null
+  ): Promise<ContinuationWrite>;
 
   appendSpin(spin: LocalSpin): Promise<void>;
   listSpins(workspaceId: string): Promise<LocalSpin[]>;
@@ -236,6 +288,92 @@ export function applyWorkspaceChange(current: Workspace, expectedRev: number, ch
   return { ...next, id: current.id, createdAt: current.createdAt, rev: current.rev + 1, updatedAt: now.toISOString() };
 }
 
+const PRESENTATION_STALE =
+  'The presentations for this class changed in another tab or window, or the class was restored or replaced. Nothing was changed. The page now shows the current state.';
+
+/** What a tab must present to change a class's presentation data. */
+export const presentationTokenOf = (workspace: Workspace): PresentationToken => ({
+  epoch: workspace.presentation?.epoch ?? null,
+  rev: workspace.presentation?.rev ?? 0,
+});
+
+/** Shared by both stores so the rules for a presentation write cannot drift between them. */
+export function applyPresentationChange(
+  current: Workspace,
+  expected: PresentationToken,
+  change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData,
+  now: Date
+): Workspace {
+  const before = current.presentation;
+  const token = presentationTokenOf(current);
+  if (token.epoch !== expected.epoch || token.rev !== expected.rev) throw new StoreConflictError(PRESENTATION_STALE);
+  const at = now.toISOString();
+  const after = commitPresentation(before, change(before ? clone(before) : undefined, clone(current)), at, newId);
+  const next: Workspace = { ...current, schemaVersion: PRESENTATION_SCHEMA_VERSION, presentation: after };
+  // The write that creates presentation data also counts as one change to the class itself.
+  // Builds from before this feature decide an empty starter class is disposable partly by its
+  // revision being 1; this keeps them from ever treating a class with presentation data that way.
+  return before ? next : { ...next, rev: current.rev + 1, updatedAt: at };
+}
+
+export interface PresentationChange {
+  expected: PresentationToken;
+  change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData;
+}
+
+/** The other classes, as they are inside the same step. */
+export interface OtherClasses {
+  find(id: string): Workspace | null;
+  names: ReadonlySet<string>;
+}
+
+export interface ContinuationWrite {
+  /** The class as this step left it. */
+  source: Workspace;
+  /** The class that was added, or null if `build` added nothing. */
+  created: Workspace | null;
+}
+
+export interface ContinuationPlan extends ContinuationWrite {
+  /** False when the class itself needs no write (no presentation change was asked for). */
+  sourceChanged: boolean;
+}
+
+/**
+ * Shared by both stores. Works out everything `continuePresentation` will
+ * write, from one consistent reading of storage, without writing anything.
+ * Throws if any part of it cannot be done.
+ */
+export function planContinuation(
+  current: Workspace,
+  all: Workspace[],
+  change: PresentationChange | null,
+  build: (source: Workspace, others: OtherClasses) => Workspace | null,
+  now: Date
+): ContinuationPlan {
+  const source = change ? applyPresentationChange(current, change.expected, change.change, now) : current;
+  const byId = new Map(all.map((workspace) => [workspace.id, workspace]));
+  const created = build(clone(source), {
+    find: (id) => {
+      const found = byId.get(id);
+      return found ? clone(found) : null;
+    },
+    names: new Set(all.map((workspace) => workspace.name)),
+  });
+  if (!created) return { source, created: null, sourceChanged: change !== null };
+  if (created.id === current.id || byId.has(created.id)) {
+    throw new StoreConflictError('A class already exists where the new class was going to be created. Nothing was changed.');
+  }
+  if (created.presentation) {
+    // The new class's presentation data passes the same gate as every other presentation write:
+    // validated, replayed and size-checked, with a lineage id of its own.
+    created.presentation = commitPresentation(undefined, created.presentation, now.toISOString(), newId);
+    created.schemaVersion = PRESENTATION_SCHEMA_VERSION;
+    created.rev = Math.max(created.rev, 2);
+  }
+  return { source, created, sourceChanged: change !== null };
+}
+
 export class MemoryStore implements WorkspaceStore {
   readonly persistent = false;
   private workspaces = new Map<string, Workspace>();
@@ -271,6 +409,30 @@ export class MemoryStore implements WorkspaceStore {
         this.workspaces.set(id, { ...current, lastBackupAt: at });
       }
     }
+  }
+
+  async updatePresentation(
+    id: string,
+    expected: PresentationToken,
+    change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData
+  ) {
+    const current = this.workspaces.get(id);
+    if (!current) throw new StoreMissingError();
+    const next = applyPresentationChange(current, expected, change, new Date());
+    this.workspaces.set(id, next);
+    return clone(next);
+  }
+
+  async continuePresentation(id: string, change: PresentationChange | null, build: (source: Workspace, others: OtherClasses) => Workspace | null) {
+    // No await in this method: it is one uninterrupted step.
+    const current = this.workspaces.get(id);
+    if (!current) throw new StoreMissingError();
+    const plan = planContinuation(current, [...this.workspaces.values()], change, build, new Date());
+    // Copy the new class before anything is stored. If it cannot be written, nothing is.
+    const created = plan.created ? clone(plan.created) : null;
+    if (plan.sourceChanged) this.workspaces.set(id, plan.source);
+    if (created) this.workspaces.set(created.id, created);
+    return { source: clone(plan.source), created: created ? clone(created) : null };
   }
 
   async appendSpin(spin: LocalSpin) {
@@ -318,7 +480,7 @@ export class MemoryStore implements WorkspaceStore {
   async putBundles(bundles: WorkspaceBundle[]) {
     // Check everything first so a failure changes nothing.
     this.assertFree(bundles, new Set());
-    this.write(bundles);
+    this.write(bundles.map(withFreshEpoch));
   }
 
   async replaceClasses(change: ClassChange): Promise<ClassChangeResult> {

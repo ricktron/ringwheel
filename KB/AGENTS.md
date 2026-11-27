@@ -120,7 +120,8 @@ Use this AGENTS.md as the repo-local implementation contract and workflow guide.
 1.2 Current structure
 Updated 2026-11-24 to match the repository after the consolidation of the
 ringwheel-classroom-spinner prototype (see docs/CONSOLIDATION.md) and the
-addition of Local Mode (see docs/LOCAL_MODE.md).
+addition of Local Mode (see docs/LOCAL_MODE.md). Updated 2026-11-25 for Presentation Draw
+logic and storage (PR 10a: no screens yet).
 
 text
 ringwheel/
@@ -131,6 +132,7 @@ ringwheel/
       mode.ts             # Which storage is in charge (local by default)
       DataRoot.tsx        # Opens browser storage, supplies the active provider
       local/              # Local Mode: schema, IndexedDB store, backup, CSV. NO network.
+    presentation/         # Presentation Draw logic: pure functions only. NO network, storage or clock.
     components/           # RingWheel, ResultPanel, SessionSpins, StorageBadge, ...
     pages/                # SpinPage, ClassesPage, AdminPage
     services/audio.ts     # Sound effects
@@ -152,6 +154,8 @@ ringwheel/
     SpinsLog.csv
   tests/gas/              # Backend test harness (fake Sheets) and contract tests
   tests/local/            # Local storage contract, backup, restore and import tests
+  tests/presentation/     # Presentation Draw storage scenarios (also run in real Chromium)
+  tests/compat/           # Rollback tests against a FROZEN copy of the pre-feature storage code
   tests/repo/             # Hygiene guards: no credentials, Local Mode stays off the network
   e2e/                    # Browser tests (both modes, hosted build) and local fake backend
   docs/                   # LOCAL_MODE.md, VERCEL.md, SECURITY.md, CONSOLIDATION.md, verification.md
@@ -178,7 +182,21 @@ src/data/local/ must never make a network request or import the backend client. 
 
 There is no .env file and no build-time configuration. Do not add a VITE_ variable for a backend address or token. Connected Mode is configured by the teacher on the Admin page.
 
-Changing the shape of local data requires a schema version bump and a migration step (see docs/LOCAL_MODE.md).
+Changing the shape of local data: version numbers describe what a record holds, not which build wrote it. A class or backup with no presentation data must stay byte-identical to what the pre-feature build writes (schema 1, format 1). Prefer an optional field on the class record; do not add an object store or raise DB_VERSION without a rollback plan, because an older site cannot open a newer database (see "Changing the schema later" in docs/LOCAL_MODE.md).
+
+Presentation Draw (logic and storage in place, screens not yet built; see "Presentation Draw storage" in docs/LOCAL_MODE.md):
+
+- It is separate from the Ecology wheel. It must not change src/utils/spin-engine.ts, the student queue, or the "In queue" checkbox. It reuses the engine's seeded shuffle and nothing else.
+- src/presentation/ is pure. No fetch, no storage, no new Date(), no Math.random. Every input is passed in. A hygiene test enforces this.
+- Presentation data changes only through WorkspaceStore.updatePresentation, with the token ({ epoch, rev }) of the class the teacher was looking at. Do not write the presentation field through updateWorkspace.
+- Every write passes commitPresentation: it replays each draw from its order, snapshot and log and refuses to store a record whose saved state does not match. Do not add a write path around it.
+- The replay signature is replay(order, base, events). Do not make replay read the roster, the clock or another class. Events record outcomes.
+- History only grows. Nothing deletes a drawn order or an event to save space. A full class is continued in a new class (continueInNewClass / finishMoving).
+- "Continue in a new class" is ONE storage step (WorkspaceStore.continuePresentation): it freezes the old class and creates the new class from the same reading. Do not split it into a freeze and a later create. A new class built from a later reading mixes the roster, settings and ring weights of one moment with the presentation state of another. If the new class is missing afterwards, finishMoving rebuilds it only when the old class's revision still equals the one recorded at the freeze, unless the caller explicitly accepts the class as it is now.
+- The first presentation write raises the class rev by one. Do not remove this: it is what stops the pre-feature build from treating a starter class with a draft as empty.
+- isUntouchedStarter must stay false for any class with a field beyond the ten original ones.
+- tests/compat/baseline-a785855/ is a frozen copy of the pre-feature storage code. Never edit it (checksums are pinned) and never import it from src/. It is how rollback is proven.
+- Size limits are measured in real backup-file bytes. Use exportBackupChecked when wiring a backup button, so a file too large to restore is refused instead of produced.
 
 Anything that deletes or replaces a local class goes through WorkspaceStore.replaceClasses (or clearAll with the classes the page showed), with the fingerprint of what the teacher was looking at. Do not add a path that reads a class in one step and removes it in another: a spin logged from a second tab in between would be lost (see "Destructive actions and other tabs" in docs/LOCAL_MODE.md).
 
