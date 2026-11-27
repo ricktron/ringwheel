@@ -282,8 +282,11 @@ function checkClassLog(value: unknown): ClassLogEntry[] {
         if (!isId(entry.studentId)) throw new PresentationError(`Class log entry ${n} is unreadable.`);
         return { ...head, t: 'presenting', studentId: entry.studentId };
       case 'moved':
-        if (!isId(entry.classId) || !isDateKey(entry.on)) throw new PresentationError(`Class log entry ${n} is unreadable.`);
-        return { ...head, t: 'moved', classId: entry.classId, on: entry.on };
+        // A class that holds presentation data always has a revision of 2 or more.
+        if (!isId(entry.classId) || !isDateKey(entry.on) || !(typeof entry.classRev === 'number' && Number.isSafeInteger(entry.classRev) && entry.classRev >= 2)) {
+          throw new PresentationError(`Class log entry ${n} is unreadable.`);
+        }
+        return { ...head, t: 'moved', classId: entry.classId, on: entry.on, classRev: entry.classRev };
       case 'reopened':
         return { ...head, t: 'reopened' };
       default:

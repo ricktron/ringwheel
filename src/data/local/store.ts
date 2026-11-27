@@ -224,6 +224,28 @@ export interface WorkspaceStore {
     change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData
   ): Promise<Workspace>;
 
+  /**
+   * One step that reads a class, optionally changes its presentation data
+   * (exactly as `updatePresentation` does), and adds at most one new class
+   * built from it.
+   *
+   * `build` is given the class exactly as this step leaves it, and a view of
+   * the other classes as they are in the same step. Whatever it returns is
+   * stored together with the change, or nothing is: a stale token, an invalid
+   * result, an id that is already in use, an error thrown by `build`, or a
+   * failed write leaves storage exactly as it was. `build` returns null to
+   * add nothing. It must be pure and must not wait for anything.
+   *
+   * This is how "continue in a new class" stays coherent: the new class's
+   * roster, settings, ring weights and presentation state are all read in the
+   * step that freezes the old class.
+   */
+  continuePresentation(
+    id: string,
+    change: PresentationChange | null,
+    build: (source: Workspace, others: OtherClasses) => Workspace | null
+  ): Promise<ContinuationWrite>;
+
   appendSpin(spin: LocalSpin): Promise<void>;
   listSpins(workspaceId: string): Promise<LocalSpin[]>;
 
@@ -294,6 +316,64 @@ export function applyPresentationChange(
   return before ? next : { ...next, rev: current.rev + 1, updatedAt: at };
 }
 
+export interface PresentationChange {
+  expected: PresentationToken;
+  change: (current: PresentationData | undefined, workspace: Workspace) => PresentationData;
+}
+
+/** The other classes, as they are inside the same step. */
+export interface OtherClasses {
+  find(id: string): Workspace | null;
+  names: ReadonlySet<string>;
+}
+
+export interface ContinuationWrite {
+  /** The class as this step left it. */
+  source: Workspace;
+  /** The class that was added, or null if `build` added nothing. */
+  created: Workspace | null;
+}
+
+export interface ContinuationPlan extends ContinuationWrite {
+  /** False when the class itself needs no write (no presentation change was asked for). */
+  sourceChanged: boolean;
+}
+
+/**
+ * Shared by both stores. Works out everything `continuePresentation` will
+ * write, from one consistent reading of storage, without writing anything.
+ * Throws if any part of it cannot be done.
+ */
+export function planContinuation(
+  current: Workspace,
+  all: Workspace[],
+  change: PresentationChange | null,
+  build: (source: Workspace, others: OtherClasses) => Workspace | null,
+  now: Date
+): ContinuationPlan {
+  const source = change ? applyPresentationChange(current, change.expected, change.change, now) : current;
+  const byId = new Map(all.map((workspace) => [workspace.id, workspace]));
+  const created = build(clone(source), {
+    find: (id) => {
+      const found = byId.get(id);
+      return found ? clone(found) : null;
+    },
+    names: new Set(all.map((workspace) => workspace.name)),
+  });
+  if (!created) return { source, created: null, sourceChanged: change !== null };
+  if (created.id === current.id || byId.has(created.id)) {
+    throw new StoreConflictError('A class already exists where the new class was going to be created. Nothing was changed.');
+  }
+  if (created.presentation) {
+    // The new class's presentation data passes the same gate as every other presentation write:
+    // validated, replayed and size-checked, with a lineage id of its own.
+    created.presentation = commitPresentation(undefined, created.presentation, now.toISOString(), newId);
+    created.schemaVersion = PRESENTATION_SCHEMA_VERSION;
+    created.rev = Math.max(created.rev, 2);
+  }
+  return { source, created, sourceChanged: change !== null };
+}
+
 export class MemoryStore implements WorkspaceStore {
   readonly persistent = false;
   private workspaces = new Map<string, Workspace>();
@@ -341,6 +421,18 @@ export class MemoryStore implements WorkspaceStore {
     const next = applyPresentationChange(current, expected, change, new Date());
     this.workspaces.set(id, next);
     return clone(next);
+  }
+
+  async continuePresentation(id: string, change: PresentationChange | null, build: (source: Workspace, others: OtherClasses) => Workspace | null) {
+    // No await in this method: it is one uninterrupted step.
+    const current = this.workspaces.get(id);
+    if (!current) throw new StoreMissingError();
+    const plan = planContinuation(current, [...this.workspaces.values()], change, build, new Date());
+    // Copy the new class before anything is stored. If it cannot be written, nothing is.
+    const created = plan.created ? clone(plan.created) : null;
+    if (plan.sourceChanged) this.workspaces.set(id, plan.source);
+    if (created) this.workspaces.set(created.id, created);
+    return { source: clone(plan.source), created: created ? clone(created) : null };
   }
 
   async appendSpin(spin: LocalSpin) {

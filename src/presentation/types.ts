@@ -212,7 +212,7 @@ export interface InactiveStudent {
 export type ClassLogEntry =
   | { n: number; at: string; t: 'not_presenting'; studentId: string; reason: InactiveReason }
   | { n: number; at: string; t: 'presenting'; studentId: string }
-  | { n: number; at: string; t: 'moved'; classId: string; on: DateKey }
+  | { n: number; at: string; t: 'moved'; classId: string; on: DateKey; classRev: number }
   | { n: number; at: string; t: 'reopened' };
 
 export interface PresentationData {
@@ -225,8 +225,12 @@ export interface PresentationData {
   classLog: ClassLogEntry[];
   /** Stored for speed. Must always equal what `classLog` adds up to. */
   inactive: InactiveStudent[];
-  /** Set while this class's presentations have been continued in another class. Nothing here can change until reopened. */
-  movedTo: { classId: string; at: string; on: DateKey } | null;
+  /**
+   * Set while this class's presentations have been continued in another class. Nothing here can change until reopened.
+   * `classRev` is the class's own revision at that moment: the roster, settings and ring weights the
+   * new class was given are the ones the class had at that revision.
+   */
+  movedTo: { classId: string; at: string; on: DateKey; classRev: number } | null;
   /** Set on a class that was created by a continuation. Never a "moved" marker of its own. */
   continuedFrom: { classId: string; marker: number } | null;
   draws: PresentationDraw[];

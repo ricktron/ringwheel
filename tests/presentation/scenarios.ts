@@ -338,7 +338,7 @@ export const scenarios: Scenario[] = [
         ['a class log with a gap', (d) => { d.classLog = [{ n: 2, at: T0, t: 'reopened' }]; }],
         ['two draws with one id', (d) => { d.draws.push(clone(d.draws[0])); }],
         ['a draft that already has an order', (d) => { d.draws[0].status = 'draft'; }],
-        ['a "moved" marker that is not in the class log', (d) => { d.movedTo = { classId: 'x', at: T0, on: DAY }; }],
+        ['a "moved" marker that is not in the class log', (d) => { d.movedTo = { classId: 'x', at: T0, on: DAY, classRev: 2 }; }],
         ['an unreadable continuation record', (d) => { (d as { continuedFrom: unknown }).continuedFrom = { classId: '../x', marker: 0 }; }],
         ['a meeting date that is not a date', (d) => { d.draws[0].meetings[0].date = '2026-02-30'; }],
       ];
@@ -1130,7 +1130,8 @@ export const scenarios: Scenario[] = [
       const marker = { sourceClassId: one.id, n: frozen.presentation!.classLog.length, at: frozen.presentation!.movedTo!.at, on: DAY };
       const expected = buildContinuation(frozen.presentation!, marker);
       const made = (await now(one.a, result.destinationId)).presentation!;
-      check(same({ ...made, epoch: '', rev: 0 }, expected), 'the new class matches the old class at the moment it was frozen');
+      // (The lineage id, the revision and the storage clock's time are set by the store when the class is written.)
+      check(same({ ...made, epoch: '', rev: 0, updatedAt: '' }, { ...expected, epoch: '', rev: 0, updatedAt: '' }), 'the new class matches the old class at the moment it was frozen');
 
       // (iii) Retrying, from either tab, finds the class already made and changes nothing.
       const settled = await snapshot(one.a);
@@ -1157,52 +1158,33 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'Q9',
-    name: 'a conflicting class is never overwritten, a failed second step can be finished later, and reopening is possible only while the new class does not exist',
+    name: 'a conflicting class is never overwritten and nothing is frozen when the new class cannot be created; reopening is refused once the new class exists',
     async run(open) {
-      // The chosen id is already something else: refused before anything is frozen.
+      // The chosen id is already something else: refused, and nothing is frozen.
       const one = await seeded(open);
       const other = await makeClass(one.a, { name: 'Unrelated class' });
       const before = await snapshot(one.a);
       await refused(continueInNewClass(one.a, one.id, await tokenNow(one.a, one.id), { today: DAY, destinationId: other.id }), ContinuationConflictError, 'continuing into an id that is taken');
       check((await snapshot(one.a)) === before, 'nothing was frozen or overwritten');
 
-      // Something else appears under that id after the old class is frozen: still not overwritten.
+      // Something else takes that id at the last moment, after this tab has checked: still not overwritten, still nothing frozen.
       const two = await seeded(open);
       const squatter = { ...createWorkspace('Squatter', new Date(T0)), id: 'dest-1' };
-      const racing = atTheLastMoment(two.a, () => two.b.createWorkspace(squatter), ['putBundles']);
-      await refused(continueInNewClass(racing, two.id, await tokenNow(two.a, two.id), { today: DAY, destinationId: 'dest-1' }), ContinuationConflictError, 'continuing when another class took the id');
+      const token = await tokenNow(two.a, two.id);
+      const untouched = JSON.stringify(await now(two.a, two.id));
+      const racing = atTheLastMoment(two.a, () => two.b.createWorkspace(squatter), ['continuePresentation']);
+      await refused(continueInNewClass(racing, two.id, token, { today: DAY, destinationId: 'dest-1' }), ContinuationConflictError, 'continuing when another class took the id');
       check(same(await now(two.a, 'dest-1'), squatter), 'the other class was not overwritten');
-      check((await now(two.a, two.id)).presentation!.movedTo?.classId === 'dest-1', 'the old class is marked as continued');
-      await refused(finishMoving(two.a, two.id), ContinuationConflictError, 'finishing while the other class is in the way');
-      await refused(reopenPresentations(two.a, two.id, await tokenNow(two.a, two.id)), PresentationError, 'reopening while a class exists under that id');
+      check(JSON.stringify(await now(two.a, two.id)) === untouched, 'the old class was not frozen: it is exactly as it was');
+      // So the work simply goes on, and can be continued under another id.
+      await revealNext(two.a, two.id, two.drawId);
+      const result = await continueInNewClass(two.a, two.id, await tokenNow(two.a, two.id), { today: DAY });
+      check(result.created && result.destinationId !== 'dest-1' && (await two.a.listWorkspaces()).length === 3, 'continuing again creates one new class under its own id');
 
-      // The second step fails outright: finish it later, or reopen instead.
-      for (const choice of ['finish', 'reopen'] as const) {
-        const three = await seeded(open);
-        await revealNext(three.a, three.id, three.drawId);
-        const failing = new Proxy(three.a, {
-          get(target, property) {
-            if (property === 'putBundles') return async () => { throw new Error('QuotaExceededError'); };
-            const value = Reflect.get(target, property) as unknown;
-            return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-          },
-        });
-        const err = await continueInNewClass(failing, three.id, await tokenNow(three.a, three.id), { today: DAY }).then(() => null, (e: unknown) => e as Error);
-        check(err !== null && /QuotaExceededError/.test(err.message), 'the failure of the second step surfaces');
-        const marked = await now(three.a, three.id);
-        check(marked.presentation!.movedTo !== null && (await three.a.listWorkspaces()).length === 1, 'the old class is marked, and no new class exists yet');
-        if (choice === 'finish') {
-          const done = await finishMoving(three.b, three.id);
-          check(done.created && done.destinationId === marked.presentation!.movedTo!.classId, '"Finish moving" creates the class the marker names');
-          check(validatePresentation((await now(three.a, done.destinationId)).presentation).ok, 'and it is valid');
-          await refused(reopenPresentations(three.a, three.id, await tokenNow(three.a, three.id)), PresentationError, 'reopening after the new class exists');
-        } else {
-          const reopened = await reopenPresentations(three.a, three.id, await tokenNow(three.a, three.id));
-          check(reopened.presentation!.movedTo === null, 'the old class is open again');
-          check(same(reopened.presentation!.draws, marked.presentation!.draws), 'with its draws exactly as they were');
-          await doAct(three.a, three.id, three.drawId, { type: 'done', entry: drawIn(reopened, three.drawId).entries.findIndex((e) => e.status === 'presenting') });
-        }
-      }
+      // Once the new class exists the old class cannot be reopened: the work continues there.
+      const frozen = JSON.stringify(await now(two.a, two.id));
+      await refused(reopenPresentations(two.a, two.id, await tokenNow(two.a, two.id)), PresentationError, 'reopening after the new class exists');
+      check(JSON.stringify(await now(two.a, two.id)) === frozen, 'a refused reopen changes nothing');
     },
   },
   {
@@ -1336,7 +1318,7 @@ export const scenarios: Scenario[] = [
       check(carryBytes * 2 <= budgetBytes, 'a continuation takes at most half of a new class');
       // The largest "continued in another class" marker, against the reserve it must fit in.
       const before = dataWith(drawnDraw(4));
-      const marked = markMoved(before, 'x'.repeat(200), '9999-12-31T23:59:59.999Z', '9999-12-31');
+      const marked = markMoved(before, 'x'.repeat(200), '9999-12-31T23:59:59.999Z', '9999-12-31', Number.MAX_SAFE_INTEGER);
       const markerBytes = presentationFileBytes({ ...marked, classLog: marked.classLog.map((e) => ({ ...e, n: 99999999 })) }) - presentationFileBytes(before);
       check(markerBytes > 0 && markerBytes * 8 <= reserveBytes, `the reserve (${reserveBytes}) should hold the largest marker (${markerBytes}) many times over`);
       // A class at the budget, with the largest roster a class may hold, every name and address at full length in three-byte characters.

@@ -20,6 +20,6 @@ describe.each(kinds)('the older build and the current build on one storage (%s)'
   });
 
   it('covers every baseline row of the matrix', () => {
-    expect(compatScenarios.map((scenario) => scenario.id)).toEqual(['C1', 'C2', 'C3', 'C4', 'C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'K14', 'S12']);
+    expect(compatScenarios.map((scenario) => scenario.id)).toEqual(['C1', 'C2', 'C3', 'C4', 'C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'K14', 'X12', 'S12']);
   });
 });

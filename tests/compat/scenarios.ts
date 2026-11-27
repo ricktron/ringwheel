@@ -10,7 +10,7 @@
  *
  * Every name and address is invented.
  */
-import { createDraw, performAction, presentationTokenOf, usageOf } from '../../src/data/local/presentations';
+import { ContinuationChangedError, continueInNewClass, createDraw, finishMoving, performAction, presentationTokenOf, usageOf } from '../../src/data/local/presentations';
 import { createWorkspace, parseBackupText, type Workspace } from '../../src/data/local/schema';
 import { StoreConflictError, StoreMissingError, type WorkspaceStore } from '../../src/data/local/store';
 import * as current from '../../src/data/local/workspaces';
@@ -365,6 +365,39 @@ export const compatScenarios: CompatScenario[] = [
       await refused(performAction(fresh, id, presentationTokenOf(beforeReplace), drawId, { type: 'unarchive' }, { today: DAY }), StoreConflictError, 'the stale presentation action after a replace');
       check((await snapshot(fresh)) === stored, 'nothing changed');
       check((await fresh.listRecoveryPoints()).some((p) => same(p.bundles[0].workspace.presentation, beforeReplace.presentation)), 'and the draws are in the recovery copy');
+    },
+  },
+  {
+    id: 'X12',
+    name: 'after a continuation the older build keeps using both classes for the wheel: presentation data in both is kept, the continuation is still recognised, and the older build\'s edits count as a change to the old class',
+    async run(open) {
+      const { fresh, old, id } = await withDraw(await open());
+      const result = await continueInNewClass(fresh, id, await tokenNow(fresh, id), { today: DAY, now: new Date(T0) });
+      const [source, destination] = [await now(fresh, id), await now(fresh, result.destinationId)];
+
+      // The older build sees two ordinary classes and uses them.
+      check((await old.listWorkspaces()).length === 2, 'the older build lists both classes');
+      await base.addStudents(old, await baselineClass(old, id), [{ name: 'Gus Madeup', email: '' }]);
+      await base.updateStudent(old, await baselineClass(old, id), 's01', { active: false });
+      await old.appendSpin(fixedSpins(id, 1)[0]);
+      await base.renameWorkspace(old, await baselineClass(old, result.destinationId), 'Period 3 Ecology, spring');
+      await old.appendSpin(fixedSpins(result.destinationId, 1)[0]);
+
+      check(same((await now(fresh, id)).presentation, source.presentation), 'the old class keeps its presentation history exactly');
+      check(same((await now(fresh, result.destinationId)).presentation, destination.presentation), 'the new class keeps its presentation data exactly');
+      check(same(await finishMoving(fresh, id), { destinationId: result.destinationId, created: false }), 'the continuation is still recognised');
+
+      // The older build deletes the new class. The old class has changed since it was frozen (the older build's own edits),
+      // so the current build will not quietly rebuild the new class from it.
+      const point = await base.deleteWorkspace(old, result.destinationId, (await base.seenClasses(old))[result.destinationId]);
+      check(point, 'the older build can delete the new class');
+      const stored = await snapshot(fresh);
+      await refused(finishMoving(fresh, id), ContinuationChangedError, 'rebuilding the new class from the changed old class');
+      check((await snapshot(fresh)) === stored, 'nothing was created');
+      // The older build's "Put it back" brings the real one back.
+      await base.applyRecoveryPoint(old, point, await base.seenClasses(old));
+      check(same(await finishMoving(fresh, id), { destinationId: result.destinationId, created: false }), 'after the older build puts it back, it is found');
+      check(same((await now(fresh, result.destinationId)).presentation, destination.presentation), 'with its presentation data intact');
     },
   },
   {

@@ -7,6 +7,7 @@ import { IDBFactory } from 'fake-indexeddb';
 import { describe, it } from 'vitest';
 import { IndexedDbStore } from '../../src/data/local/idb-store';
 import { MemoryStore } from '../../src/data/local/store';
+import { continuationScenarios } from './continuation-scenarios';
 import { scenarios, type Tabs } from './scenarios';
 
 const kinds: [string, () => Promise<Tabs>][] = [
@@ -27,7 +28,7 @@ const kinds: [string, () => Promise<Tabs>][] = [
 ];
 
 describe.each(kinds)('presentation draws in storage (%s)', (kind, open) => {
-  for (const scenario of scenarios) {
+  for (const scenario of [...scenarios, ...continuationScenarios]) {
     if (scenario.memoryOnly && kind !== 'MemoryStore') continue;
     it(`${scenario.id}: ${scenario.name}`, () => scenario.run(open), scenario.heavy ? 120000 : 30000);
   }

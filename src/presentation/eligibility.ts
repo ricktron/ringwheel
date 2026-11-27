@@ -118,7 +118,7 @@ export function foldClassLog(log: ClassLogEntry[]): Pick<PresentationData, 'inac
   for (const entry of log) {
     if (entry.t === 'not_presenting') inactive.set(entry.studentId, { studentId: entry.studentId, reason: entry.reason, since: entry.at });
     else if (entry.t === 'presenting') inactive.delete(entry.studentId);
-    else if (entry.t === 'moved') movedTo = { classId: entry.classId, at: entry.at, on: entry.on };
+    else if (entry.t === 'moved') movedTo = { classId: entry.classId, at: entry.at, on: entry.on, classRev: entry.classRev };
     else movedTo = null;
   }
   return { inactive: [...inactive.values()], movedTo };
@@ -144,9 +144,10 @@ export function setPresenting(data: PresentationData, studentId: string, present
   return append(data, presenting ? { n, at, t: 'presenting', studentId } : { n, at, t: 'not_presenting', studentId, reason });
 }
 
-export function markMoved(data: PresentationData, classId: string, at: string, on: DateKey): PresentationData {
+/** `classRev` is the class's own revision at this moment: it identifies the roster, settings and ring weights the new class is given. */
+export function markMoved(data: PresentationData, classId: string, at: string, on: DateKey, classRev: number): PresentationData {
   if (data.movedTo) throw new PresentationError('Presentations for this class were already continued in another class.');
-  return append(data, { n: data.classLog.length + 1, at, t: 'moved', classId, on });
+  return append(data, { n: data.classLog.length + 1, at, t: 'moved', classId, on, classRev });
 }
 
 export function markReopened(data: PresentationData, at: string): PresentationData {

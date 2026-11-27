@@ -1345,6 +1345,7 @@ await step('presentation draws and rollback to the older build hold against the 
   // inside the page against the browser's real database engine.
   const outcome = await lp.evaluate(async () => {
     const { scenarios } = await import('/tests/presentation/scenarios.ts');
+    const { continuationScenarios } = await import('/tests/presentation/continuation-scenarios.ts');
     const { compatScenarios } = await import('/tests/compat/scenarios.ts');
     const { indexedDbPair } = await import('/tests/compat/pair.ts');
     const { IndexedDbStore } = await import('/src/data/local/idb-store.ts');
@@ -1383,7 +1384,7 @@ await step('presentation draws and rollback to the older build hold against the 
       }
       return results;
     };
-    const storage = await run(scenarios, openTabs, (scenario) => scenario.heavy || scenario.memoryOnly);
+    const storage = await run([...scenarios, ...continuationScenarios], openTabs, (scenario) => scenario.heavy || scenario.memoryOnly);
     const rollback = await run(compatScenarios, openPair, () => false);
     // Leave nothing behind in the browser.
     for (const store of opened) store.close();
@@ -1402,11 +1403,13 @@ await step('presentation draws and rollback to the older build hold against the 
   assert.deepEqual([...outcome.storage, ...outcome.rollback].filter((result) => !result.ok), []);
   // The rows the plan marks for a real browser, and the rest of the rollback rows.
   const ran = new Set([...outcome.storage, ...outcome.rollback].map((result) => result.id));
-  for (const id of ['C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'K1', 'K2', 'K6', 'K7', 'K10', 'K11', 'K13', 'K14', 'S2', 'S9', 'S10', 'S12']) {
+  // X1 to X12: a continuation is one coherent snapshot, survives interruption, and is never duplicated or overwritten.
+  const continuation = ['X1', 'X2', 'X3', 'X4', 'X5', 'X6', 'X7', 'X8', 'X9', 'X10', 'X11', 'X12'];
+  for (const id of ['C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'K1', 'K2', 'K6', 'K7', 'K10', 'K11', 'K13', 'K14', 'S2', 'S9', 'S10', 'S12', ...continuation]) {
     assert.ok(ran.has(id), `${id} did not run in the browser`);
   }
-  assert.ok(outcome.storage.length >= 35, `only ${outcome.storage.length} storage scenarios ran`);
-  assert.equal(outcome.rollback.length, 12);
+  assert.ok(outcome.storage.length >= 46, `only ${outcome.storage.length} storage scenarios ran`);
+  assert.equal(outcome.rollback.length, 13);
   assert.deepEqual(outcome.left, ['ringwheel'], 'the check left a database behind or touched the app\'s own');
   realIdbPresentation = outcome.storage.length + outcome.rollback.length;
 });

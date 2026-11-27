@@ -22,8 +22,11 @@ import {
   byName,
   checkClearAll,
   planClassChange,
+  planContinuation,
   type ClassChange,
   type ClassChangeResult,
+  type OtherClasses,
+  type PresentationChange,
   withFreshEpoch,
   type RecoveryPoint,
   type WorkspaceStore,
@@ -169,6 +172,26 @@ export class IndexedDbStore implements WorkspaceStore {
       const next = applyPresentationChange(asWorkspace(current), expected, change, new Date());
       await request(store.put(next));
       return next;
+    });
+  }
+
+  /**
+   * One transaction. The class, the other classes, the presentation change and
+   * the new class are all read, checked and written inside it. The class is
+   * written first and the new class second, so if the new class cannot be
+   * written the transaction is aborted and the first write is undone with it.
+   */
+  continuePresentation(id: string, change: PresentationChange | null, build: (source: Workspace, others: OtherClasses) => Workspace | null) {
+    return this.transact(['workspaces'], 'readwrite', async (tx) => {
+      const store = tx.objectStore('workspaces');
+      const all = (await request(store.getAll())).map(asWorkspace);
+      const current = all.find((workspace) => workspace.id === id);
+      if (!current) throw new StoreMissingError();
+      const plan = planContinuation(current, all, change, build, new Date());
+      if (plan.sourceChanged) await request(store.put(plan.source));
+      // add() refuses an id that is already in use.
+      if (plan.created) await request(store.add(plan.created));
+      return { source: plan.source, created: plan.created };
     });
   }
 

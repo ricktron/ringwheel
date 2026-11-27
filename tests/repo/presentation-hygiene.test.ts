@@ -82,7 +82,7 @@ describe('nothing a teacher can see is wired to Presentation Draw yet', () => {
     expect(screens.length).toBeGreaterThan(5);
     for (const file of screens) {
       expect(reaches(file), `${file} must not import presentation code in PR 10a`).toBe(false);
-      expect(code(file), `${file} must not call the size-checked backup yet`).not.toMatch(/exportBackupChecked|updatePresentation/);
+      expect(code(file), `${file} must not call the size-checked backup yet`).not.toMatch(/exportBackupChecked|updatePresentation|continuePresentation/);
     }
   });
 

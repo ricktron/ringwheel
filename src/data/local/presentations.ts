@@ -1,9 +1,10 @@
 /**
  * Presentation Draw operations on Local Mode data.
  *
- * Every write here goes through `store.updatePresentation`, which checks that
- * the class is still what the caller last saw, validates and replays the
- * result, and checks its size, all in one step. Nothing in this file makes a
+ * Every write here goes through `store.updatePresentation`, or, where a new
+ * class is created from an old one, `store.continuePresentation`. Both check
+ * that the class is still what the caller last saw, validate and replay the
+ * result, and check its size, all in one step. Nothing in this file makes a
  * network request.
  *
  * There is no screen for any of this yet. These are the operations the
@@ -24,7 +25,6 @@ import {
   type PresentationToken,
   type Timing,
 } from '../../presentation/types';
-import { validatePresentation } from '../../presentation/validate';
 import { randomSeed } from '../../utils/spin-engine';
 import { LIMITS, PRESENTATION_SCHEMA_VERSION, newId, type BackupFile, type Workspace } from './schema';
 import { StoreMissingError, presentationTokenOf, type WorkspaceStore } from './store';
@@ -153,81 +153,69 @@ const markerOf = (sourceId: string, data: PresentationData): CarryMarker => {
 const isContinuationOf = (workspace: Workspace, marker: CarryMarker): boolean =>
   workspace.presentation?.continuedFrom?.classId === marker.sourceClassId && workspace.presentation.continuedFrom.marker === marker.n;
 
-/** The new class must be valid and must have real room to work in, or the old class is not frozen. */
-function assertFits(planned: PresentationData): void {
-  const checked = validatePresentation({ ...planned, rev: 1 });
-  if (!checked.ok) throw new PresentationError(`The continuation could not be prepared, so nothing was changed. ${checked.problems[0]}`);
-  if (presentationFileBytes(checked.value) > PRESENTATION_LIMITS.carryBytes) {
-    throw new PresentationError('The continuation would not leave room to work in the new class, so nothing was changed.');
+/**
+ * Thrown when the class a continuation went to is no longer here and the old
+ * class's roster, settings or ring weights have changed since it was frozen.
+ * The class as it was at that moment cannot be rebuilt, so nothing is created
+ * unless the caller says the class as it is now should be used.
+ */
+export class ContinuationChangedError extends Error {
+  constructor() {
+    super(
+      'The class these presentations were continued in is no longer here, and this class has changed since then. Nothing was created. Put the other class back from Recovery, or choose to continue again with this class as it is now.'
+    );
+    this.name = 'ContinuationChangedError';
   }
 }
 
+const copyOf = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
 /**
- * Step 2, and the whole of a retry: create the class the marker names.
- * Safe to repeat from any tab. The old class cannot change once it is marked,
- * so every attempt builds the same thing. If the class is already there and is
- * this continuation, that is success. If something else is there, nothing is
- * overwritten.
+ * The new class, built from one reading of the old class. The caller makes
+ * that reading inside the storage step that freezes (or has frozen) the old
+ * class, so every part of the result comes from the same moment.
  */
-export async function finishMoving(store: WorkspaceStore, sourceId: string): Promise<ContinuationResult> {
-  const source = await store.getWorkspace(sourceId);
-  if (!source || !source.presentation) throw new StoreMissingError();
-  const marker = markerOf(sourceId, source.presentation);
-  const destinationId = source.presentation.movedTo!.classId;
-
-  const settle = (existing: Workspace): ContinuationResult => {
-    if (!isContinuationOf(existing, marker)) throw new ContinuationConflictError();
-    return { destinationId, created: false };
-  };
-  const existing = await store.getWorkspace(destinationId);
-  if (existing) return settle(existing);
-
-  const planned = buildContinuation(source.presentation, marker);
-  assertFits(planned);
-  const names = new Set((await store.listWorkspaces()).map((w) => w.name));
+function continuationOf(source: Workspace, marker: CarryMarker, destinationId: string, names: ReadonlySet<string>, at: string): Workspace {
+  const planned = buildContinuation(source.presentation as PresentationData, marker);
+  // The new class must have real room to work in. (Validity and the size budget are checked by the store.)
+  if (presentationFileBytes({ ...planned, epoch: 'x'.repeat(36), rev: 1 }) > PRESENTATION_LIMITS.carryBytes) {
+    throw new PresentationError('The continuation would not leave room to work in the new class, so nothing was changed.');
+  }
   const baseName = `${source.name} (continued)`.slice(0, LIMITS.nameLength);
   let name = baseName;
   for (let n = 2; names.has(name); n++) name = `${baseName.slice(0, LIMITS.nameLength - 6)} (${n})`;
-
-  const workspace: Workspace = {
+  return {
     id: destinationId,
     schemaVersion: PRESENTATION_SCHEMA_VERSION,
     name,
-    createdAt: marker.at,
-    updatedAt: marker.at,
+    createdAt: at,
+    updatedAt: at,
     // A class that holds presentation data always has a revision above 1.
     rev: 2,
     // The same students with the same ids, so every carried presenter still points at the right person.
-    students: JSON.parse(JSON.stringify(source.students)) as Workspace['students'],
-    settings: JSON.parse(JSON.stringify(source.settings)) as Workspace['settings'],
-    rings: JSON.parse(JSON.stringify(source.rings)) as Workspace['rings'],
+    students: copyOf(source.students),
+    settings: copyOf(source.settings),
+    rings: copyOf(source.rings),
     lastBackupAt: null,
-    // The store assigns the lineage id when the class is put.
-    presentation: { ...planned, rev: 1 },
+    // The store validates this, sizes it and gives it its own lineage id.
+    presentation: planned,
   };
-  try {
-    // Adds a class and removes nothing. An id that is already in use is refused, never overwritten.
-    await store.putBundles([{ workspace, spins: [] }]);
-    return { destinationId, created: true };
-  } catch (err) {
-    // Another tab may have created it a moment ago.
-    const now = await store.getWorkspace(destinationId);
-    if (now) return settle(now);
-    throw err;
-  }
 }
 
 /**
  * Continue this class's presentations in a new class.
  *
- * 1. Before anything is frozen: choose the new class's id, confirm it is free,
- *    and confirm the continuation is valid and leaves room to work.
- * 2. Mark the old class as continued (one small class-log entry). From then on
- *    its presentation data cannot change in any tab.
- * 3. Create the new class from that frozen state.
+ * One storage step does all of it: confirms this tab's view is current,
+ * confirms the new class's id is free and the continuation is valid and has
+ * room, marks the old class as continued, and creates the new class from the
+ * old class exactly as that step reads it. So the new class's roster,
+ * settings, ring weights, presentation state and absences for the day all
+ * come from the same moment, and there is no moment at which the old class is
+ * frozen but the new class does not exist. If any part cannot be done, nothing
+ * is changed.
  *
- * If step 3 does not complete, `finishMoving` completes it later from any tab,
- * using the id recorded in step 2. Nothing in the old class is deleted.
+ * Calling it again on a class that was already continued changes nothing and
+ * reports the class that exists (see `finishMoving`).
  */
 export async function continueInNewClass(
   store: WorkspaceStore,
@@ -235,32 +223,104 @@ export async function continueInNewClass(
   expected: PresentationToken,
   options: { now?: Date; today: DateKey; destinationId?: string }
 ): Promise<ContinuationResult> {
-  const source = await store.getWorkspace(sourceId);
-  if (!source) throw new StoreMissingError();
-  if (!source.presentation) throw new PresentationError('This class has no presentations to continue.');
-  if (source.presentation.movedTo) return finishMoving(store, sourceId);
+  const seen = await store.getWorkspace(sourceId);
+  if (!seen) throw new StoreMissingError();
+  if (!seen.presentation) throw new PresentationError('This class has no presentations to continue.');
+  if (seen.presentation.movedTo) return finishMoving(store, sourceId, { now: options.now });
 
   const destinationId = options.destinationId ?? newId();
   const at = (options.now ?? new Date()).toISOString();
-  if (await store.getWorkspace(destinationId)) throw new ContinuationConflictError();
-  assertFits(buildContinuation(source.presentation, { sourceClassId: sourceId, n: source.presentation.classLog.length + 1, at, on: options.today }));
-
-  await store.updatePresentation(sourceId, expected, (current) => {
-    if (!current) throw new PresentationError('This class has no presentations to continue.');
-    return markMoved(current, destinationId, at, options.today);
-  });
-  return finishMoving(store, sourceId);
+  await store.continuePresentation(
+    sourceId,
+    {
+      expected,
+      change: (current, workspace) => {
+        if (!current) throw new PresentationError('This class has no presentations to continue.');
+        return markMoved(current, destinationId, at, options.today, workspace.rev);
+      },
+    },
+    (source, others) => {
+      // Never overwritten, and checked before anything is frozen: this runs in the same step.
+      if (others.find(destinationId)) throw new ContinuationConflictError();
+      return continuationOf(source, markerOf(sourceId, source.presentation as PresentationData), destinationId, others.names, at);
+    }
+  );
+  return { destinationId, created: true };
 }
 
-/** Undo "continued in another class", if the other class was never created and this class is not full. */
+/**
+ * For a class that is marked as continued: make sure the class it was
+ * continued in exists. Safe to repeat from any tab.
+ *
+ * - If that class is here and is this continuation, nothing is changed.
+ * - If something else is under its id, nothing is overwritten
+ *   (`ContinuationConflictError`).
+ * - If it is not here (it was deleted, or only the old class was restored
+ *   from a backup) and the old class has not changed since it was frozen, the
+ *   class is created again exactly as it was first created.
+ * - If it is not here and the old class has changed since, nothing is created
+ *   (`ContinuationChangedError`) unless `acceptCurrentClass` is set. Then the
+ *   new class is built from the old class as it is now, in one step.
+ *
+ * Whichever happens, the new class is read from the old class and written in
+ * one storage step.
+ */
+export async function finishMoving(
+  store: WorkspaceStore,
+  sourceId: string,
+  options: { now?: Date; acceptCurrentClass?: boolean } = {}
+): Promise<ContinuationResult> {
+  const at = (options.now ?? new Date()).toISOString();
+  let destinationId = '';
+  const { created } = await store.continuePresentation(sourceId, null, (source, others) => {
+    if (!source.presentation) throw new PresentationError('This class has no presentations to continue.');
+    const marker = markerOf(sourceId, source.presentation);
+    const movedTo = source.presentation.movedTo as NonNullable<PresentationData['movedTo']>;
+    destinationId = movedTo.classId;
+    const existing = others.find(destinationId);
+    if (existing) {
+      if (!isContinuationOf(existing, marker)) throw new ContinuationConflictError();
+      return null;
+    }
+    // The class's own revision rises with every roster, settings or ring-weight edit.
+    const unchanged = source.rev === movedTo.classRev;
+    if (!unchanged && !options.acceptCurrentClass) throw new ContinuationChangedError();
+    return continuationOf(source, marker, destinationId, others.names, unchanged ? marker.at : at);
+  });
+  return { destinationId, created: created !== null };
+}
+
+/**
+ * Undo "continued in another class". Possible only while the class it was
+ * continued in does not exist, and only if this class is not full.
+ * The check and the change are one storage step, so another tab cannot create
+ * that class in between.
+ */
 export async function reopenPresentations(store: WorkspaceStore, classId: string, expected: PresentationToken, now: Date = new Date()): Promise<Workspace> {
-  const workspace = await store.getWorkspace(classId);
-  if (!workspace || !workspace.presentation) throw new StoreMissingError();
-  const movedTo = workspace.presentation.movedTo;
-  if (movedTo && (await store.getWorkspace(movedTo.classId))) {
-    throw new PresentationError('The class these presentations were continued in exists. Work continues there, so they cannot also be reopened here.');
-  }
-  return store.updatePresentation(classId, expected, (current) => markReopened(current as PresentationData, now.toISOString()));
+  let marker: CarryMarker | null = null;
+  let destinationId = '';
+  const { source } = await store.continuePresentation(
+    classId,
+    {
+      expected,
+      change: (current) => {
+        if (!current) throw new PresentationError('This class has no presentations.');
+        if (current.movedTo) {
+          marker = markerOf(classId, current);
+          destinationId = current.movedTo.classId;
+        }
+        return markReopened(current, now.toISOString());
+      },
+    },
+    (_source, others) => {
+      const existing = marker ? others.find(destinationId) : null;
+      if (existing && isContinuationOf(existing, marker as CarryMarker)) {
+        throw new PresentationError('The class these presentations were continued in exists. Work continues there, so they cannot also be reopened here.');
+      }
+      return null;
+    }
+  );
+  return source;
 }
 
 // ---------------------------------------------------------------------------

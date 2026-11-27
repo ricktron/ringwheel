@@ -265,7 +265,8 @@ interface PresentationData {
   updatedAt: string;
   classLog: ClassLogEntry[];          // class-level eligibility changes and the "continued" marker
   inactive: InactiveStudent[];        // students not presenting in this class (derived from classLog)
-  movedTo: { classId; at; on } | null;        // set when the work continued in another class
+  movedTo: { classId; at; on; classRev } | null;  // set when the work continued in another class;
+                                              // classRev is the class's own revision at that moment
   continuedFrom: { classId; marker } | null;  // set on a class that continues another
   draws: PresentationDraw[];
 }
@@ -367,11 +368,34 @@ on every write and the number that matters for restore are the same number.
 
 Nothing is ever deleted to make room. A full class is continued in a new one:
 
-- **Continue in a new class** (`continueInNewClass`) checks first that the new class id is free
-  and that the continuation fits, then freezes the old class with one marker, then creates the
-  new class. If the last step fails, `finishMoving` completes it from any tab, any number of
-  times, and always arrives at the same class. It never overwrites a class that is not the
-  continuation. `reopenPresentations` undoes the freeze while the new class does not exist.
+- **Continue in a new class** (`continueInNewClass`) is one storage step
+  (`WorkspaceStore.continuePresentation`). Inside that one step it confirms the tab's view is
+  current, confirms the new class's id is free and that the continuation is valid and fits,
+  marks the old class as continued, and creates the new class from the old class exactly as
+  the step reads it. If any part fails, including the write of the new class, nothing is
+  changed: the old class is not frozen and no class is created.
+- **The new class is one coherent snapshot.** Its roster, settings, ring weights, presentation
+  state and absences for the day all come from that single reading. There is no moment at
+  which the old class is frozen and the new class does not exist, so an edit in another tab
+  lands either wholly before the step (and is in both classes) or wholly after it (and is in
+  the old class only). An earlier version froze first and built the new class in a second
+  step from a later reading; a roster edit in between produced a new class that mixed two
+  moments. Scenarios X1 to X4 reproduce that and now pass.
+- **The old class stays a working class.** Roster, settings, ring weights, spins, backup,
+  delete and put-back all work there afterwards. Only its presentation history is closed.
+- **Retries change nothing.** Calling `continueInNewClass` or `finishMoving` again, from any
+  tab with any token, finds the class that exists. It is recognised by its id and by the
+  `continuedFrom` record naming this class and this marker. Anything else under that id is
+  never accepted and never overwritten (`ContinuationConflictError`).
+- **If the new class is later missing** (deleted, or only the old class was restored from a
+  backup), `finishMoving` creates it again in one step. The marker records the old class's
+  revision at the freeze (`classRev`), which rises with every roster, settings or ring-weight
+  edit. If it is unchanged, the class is rebuilt exactly as first created. If it has changed,
+  nothing is created (`ContinuationChangedError`) unless the caller passes
+  `acceptCurrentClass`, and then the new class is built from the old class as it is now, in
+  one step, and dated when it was really made.
+- `reopenPresentations` undoes the freeze while the continuation does not exist. The check and
+  the change are one step, so a reopen and a recreation in two tabs can never both happen.
 - The new class carries every unfinished presenter with their exact state (on deck, revealed,
   held until a date, absent today, skipped, exclusions, schedule) and starts its own class log
   consistent with the copied eligibility. It does not copy the old class's marker.
@@ -417,6 +441,27 @@ These refine the blueprint's capacity and continuation cases.
 | Q10 | A class at the largest valid size can always be continued | Q3, Q13, "the largest valid classes" |
 | Q11 | Backup size is the real serialized size including roster, settings and spins | Q11, Q14 |
 | Q12 | Neither a single-class nor an all-class backup over the restore limit is produced silently | Q11 |
+
+### Continuation integrity cases (2026-11-27)
+
+Added after review found that the new class could be built from a later reading of the old
+class than the one that froze it. All run on both stores and in Chromium's own IndexedDB
+(`tests/presentation/continuation-scenarios.ts`, and X12 in `tests/compat/scenarios.ts`).
+
+| Case | Requirement |
+| --- | --- |
+| X1 | An edit landing immediately after the freeze is not in the new class |
+| X2 | An edit landing immediately before the freeze is in both classes |
+| X3 | Interrupted, then the roster is edited, then recovery: the new class matches the old class at the recorded freeze |
+| X4 | An interruption while the new class is being written undoes the whole step, including the write already made to the old class |
+| X5 | Retries from any tab with any token create no second class and never reset the new class |
+| X6 | The old class keeps working for the wheel; neither class changes the other |
+| X7 | New class deleted, old class unchanged: recreated exactly as first created, once, even when two tabs ask together |
+| X8 | New class deleted, old class changed: nothing is created silently; accept the current class in one step, or reopen |
+| X9 | A class under the destination id that is unrelated, or names another marker or another class, is never accepted or overwritten |
+| X10 | Reopen and recreation can never both happen |
+| X11 | The storage step refuses a stale view, an id in use, an invalid new class and a builder error, each with nothing stored |
+| X12 | The older build keeps using both classes; its edits count as a change to the old class |
 
 ## Interfaces reserved for later work
 

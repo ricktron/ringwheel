@@ -220,7 +220,7 @@ describe('carried-over draws and the class log', () => {
     source = setPresenting(source, 's03', false, 'left_the_class', '2026-11-20T10:00:00.000Z');
     source = setPresenting(source, 's04', false, 'teacher_choice', '2026-11-21T10:00:00.000Z');
     source = setPresenting(source, 's03', true, 'teacher_choice', '2026-11-22T10:00:00.000Z');
-    const moved = markMoved(source, 'class-b', marker.at, marker.on);
+    const moved = markMoved(source, 'class-b', marker.at, marker.on, 2);
     const next = buildContinuation(moved, { ...marker, n: moved.classLog.length });
 
     expect(next.movedTo).toBeNull();
@@ -311,8 +311,8 @@ describe('the gate every write passes through', () => {
   });
 
   it('a class whose presentations were continued elsewhere cannot change, except to be reopened', () => {
-    const moved = commitPresentation(stored, markMoved(stored, 'class-b', at, DAY), at, epoch);
-    expect(moved.movedTo).toEqual({ classId: 'class-b', at, on: DAY });
+    const moved = commitPresentation(stored, markMoved(stored, 'class-b', at, DAY, 2), at, epoch);
+    expect(moved.movedTo).toEqual({ classId: 'class-b', at, on: DAY, classRev: 2 });
     expect(() => commitPresentation(moved, { ...moved, draws: [act(moved.draws[0], { type: 'archive' }, ctx())] }, at, epoch)).toThrow(PresentationMovedError);
     expect(() => commitPresentation(moved, setPresenting(moved, 's02', false, 'teacher_choice', at), at, epoch)).toThrow(PresentationMovedError);
   });
@@ -396,7 +396,7 @@ describe('capacity', () => {
     expect(() => commit(data, { ...data, draws: [act(data.draws[0], { type: 'undo', event: data.draws[0].events.length }, ctx())] })).toThrow(/is full/);
     expect(JSON.stringify(data)).toBe(frozen);
     // Q4: the "continued in another class" marker still fits, because the reserve is kept for it.
-    const moved = commit(data, markMoved(data, 'class-b', at, DAY));
+    const moved = commit(data, markMoved(data, 'class-b', at, DAY, 2));
     expect(moved.movedTo?.classId).toBe('class-b');
     expect(presentationFileBytes(moved)).toBeLessThanOrEqual(small.budgetBytes);
   });
@@ -452,7 +452,7 @@ describe('capacity', () => {
         continue;
       }
       // The action was refused (or nothing was possible). Then continuing in a new class must work, every time.
-      const moved = commit(data, markMoved(data, `class-${classes + 1}`, context.at, DAY));
+      const moved = commit(data, markMoved(data, `class-${classes + 1}`, context.at, DAY, 2));
       const continued = buildContinuation(moved, { sourceClassId: `class-${classes}`, n: moved.classLog.length, at: context.at, on: DAY });
       const check = validatePresentation({ ...continued, rev: 1 }, small);
       expect(check, `press ${press}: the continuation was not valid`).toMatchObject({ ok: true });
@@ -485,7 +485,7 @@ describe('capacity', () => {
     }
     expect(count).toBeGreaterThan(2);
     expect(count).toBeLessThan(400);
-    const movedBig = commitPresentation(big, markMoved(big, 'class-b', at, DAY), at, () => 'e1');
+    const movedBig = commitPresentation(big, markMoved(big, 'class-b', at, DAY, 2), at, () => 'e1');
     const next = buildContinuation(movedBig, { sourceClassId: 'class-a', n: movedBig.classLog.length, at, on: DAY });
     expect(validatePresentation({ ...next, rev: 1 })).toMatchObject({ ok: true });
     expect(presentationUsage({ ...next, rev: 1 }).fraction).toBeLessThanOrEqual(0.5);
